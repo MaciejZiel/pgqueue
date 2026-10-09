@@ -12,9 +12,11 @@ import asyncpg
 from pydantic import BaseModel, ValidationError
 
 from pgqueue.backoff import DEFAULT_RETRY_POLICY, RetryPolicy
+from pgqueue.cron import CronExpression
 from pgqueue.dsn import asyncpg_dsn
 from pgqueue.errors import PayloadError, PgQueueError, UnknownTaskError
 from pgqueue.models import Job, JobContext
+from pgqueue.periodic import PeriodicSchedule
 from pgqueue.store import JobPool, JobStore, create_pool
 
 DEFAULT_QUEUE = "default"
@@ -233,6 +235,7 @@ class PgQueue:
         self.pool_min_size = pool_min_size
         self.pool_max_size = pool_max_size
         self.tasks: dict[str, Task[Any]] = {}
+        self.schedules: dict[str, PeriodicSchedule] = {}
         self._pool: JobPool | None = None
         self._store: JobStore | None = None
 
@@ -301,6 +304,37 @@ class PgQueue:
             retry=retry or DEFAULT_RETRY_POLICY,
         )
         return _TaskDecorator(self, name, options)
+
+    def periodic[M: BaseModel | None](
+        self,
+        cron: str,
+        *,
+        name: str | None = None,
+        payload: M | dict[str, Any] | None = None,
+        queue: str | None = None,
+    ) -> Callable[[Task[M]], Task[M]]:
+        """Run a task on a cron schedule (UTC). Stack it on top of ``@app.task``::
+
+        @app.periodic("*/15 * * * *")
+        @app.task()
+        async def refresh_exchange_rates() -> None: ...
+        """
+        expression = CronExpression.parse(cron)
+
+        def decorate(task: Task[M]) -> Task[M]:
+            schedule_name = name or task.name
+            if schedule_name in self.schedules:
+                raise PgQueueError(f"periodic schedule {schedule_name!r} already exists")
+            self.schedules[schedule_name] = PeriodicSchedule(
+                name=schedule_name,
+                cron=expression,
+                task=task,
+                payload=task.dump_payload(payload),
+                queue=queue,
+            )
+            return task
+
+        return decorate
 
     def register(self, task: Task[Any]) -> None:
         if task.name in self.tasks:

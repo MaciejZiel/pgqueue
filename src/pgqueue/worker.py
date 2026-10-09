@@ -35,6 +35,7 @@ from pgqueue.backoff import DEFAULT_RETRY_POLICY
 from pgqueue.models import Job, JobContext
 from pgqueue.notify import Listener
 from pgqueue.outcomes import decide_failure, format_error
+from pgqueue.periodic import PeriodicScheduler
 from pgqueue.schema import NOTIFY_CHANNEL, JobStatus
 
 log = logging.getLogger("pgqueue.worker")
@@ -60,6 +61,8 @@ class Worker:
         heartbeat_interval: float | None = None,
         reap_interval: float | None = None,
         listen: bool = True,
+        run_periodic: bool = True,
+        periodic_interval: float = 1.0,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
@@ -78,6 +81,8 @@ class Worker:
         # lease expiring under a healthy worker.
         self.heartbeat_interval = heartbeat_interval or lease_seconds / 3
         self.reap_interval = reap_interval or lease_seconds / 2
+        self.periodic_interval = periodic_interval
+        self.scheduler = PeriodicScheduler(app) if run_periodic else None
         self.listener: Listener | None = None
         if listen:
             self.listener = Listener(
@@ -146,6 +151,11 @@ class Worker:
         ]
         if self.listener is not None:
             self._background.append(asyncio.create_task(self.listener.run()))
+        if self.scheduler is not None and self.app.schedules:
+            await self.scheduler.sync()
+            self._background.append(
+                asyncio.create_task(self._every(self.periodic_interval, self._fire_periodic))
+            )
         try:
             await self._loop()
         finally:
@@ -235,6 +245,10 @@ class Worker:
         for job_id, status, owner in await self.app.store.reap_expired():
             log.warning("recovered job %d from %s -> %s", job_id, owner, status.value)
         self._wakeup.set()
+
+    async def _fire_periodic(self) -> None:
+        assert self.scheduler is not None
+        await self.scheduler.tick()
 
     # -- running one job ---------------------------------------------------------------------
 
