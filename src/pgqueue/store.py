@@ -175,6 +175,7 @@ class JobStore:
         max_attempts: int,
         idempotency_key: str | None,
         delay: float = 0.0,
+        connection: asyncpg.Connection | None = None,
     ) -> tuple[int, bool]:
         """Insert one job; return ``(id, created)``.
 
@@ -182,36 +183,32 @@ class JobStore:
         the id of the existing job is returned with ``created=False``.
         ``run_at`` (absolute) wins over ``delay`` (seconds from the database's
         clock, which avoids trusting the producer's clock).
+
+        Pass ``connection`` to enqueue inside your own transaction: the job
+        then becomes visible exactly when (and only if) that transaction
+        commits -- the transactional-outbox property a separate broker
+        cannot give you.
         """
+        args = (queue, task, payload, priority, run_at, max_attempts, idempotency_key, delay)
+        if connection is not None:
+            return await self._insert_on(connection, args, idempotency_key)
         async with self.pool.acquire() as conn:
-            job_id: int | None = await conn.fetchval(
-                _INSERT,
-                queue,
-                task,
-                payload,
-                priority,
-                run_at,
-                max_attempts,
-                idempotency_key,
-                delay,
-            )
+            return await self._insert_on(conn, args, idempotency_key)
+
+    @staticmethod
+    async def _insert_on(
+        conn: asyncpg.Connection, args: tuple[Any, ...], idempotency_key: str | None
+    ) -> tuple[int, bool]:
+        while True:
+            job_id: int | None = await conn.fetchval(_INSERT, *args)
             if job_id is not None:
                 return job_id, True
             existing: int | None = await conn.fetchval(
                 "SELECT id FROM pgqueue_jobs WHERE idempotency_key = $1", idempotency_key
             )
-            if existing is None:  # pragma: no cover - conflicting row deleted in between
-                return await self.insert(
-                    queue=queue,
-                    task=task,
-                    payload=payload,
-                    priority=priority,
-                    run_at=run_at,
-                    max_attempts=max_attempts,
-                    idempotency_key=idempotency_key,
-                    delay=delay,
-                )
-            return existing, False
+            if existing is not None:
+                return existing, False
+            # The conflicting row was deleted in between: try the insert again.
 
     async def insert_many(
         self,

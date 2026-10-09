@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Concatenate, Self, get_type_hints, overload
 
+import asyncpg
 from pydantic import BaseModel, ValidationError
 
 from pgqueue.backoff import DEFAULT_RETRY_POLICY, RetryPolicy
@@ -114,6 +115,7 @@ class Task[M: BaseModel | None]:
         idempotency_key: str | None = None,
         delay: float | timedelta | None = None,
         run_at: datetime | None = None,
+        connection: asyncpg.Connection | None = None,
     ) -> int:
         """Add one job for this task and return its id.
 
@@ -122,6 +124,10 @@ class Task[M: BaseModel | None]:
 
         If ``idempotency_key`` is given and a job with that key already exists,
         no new job is created and the existing job's id is returned.
+
+        Pass an asyncpg ``connection`` with an open transaction to enqueue
+        atomically with your own writes: if the transaction rolls back, the
+        job never existed.
         """
         at, seconds = resolve_schedule(delay, run_at)
         job_id, _ = await self.app.store.insert(
@@ -133,6 +139,7 @@ class Task[M: BaseModel | None]:
             delay=seconds,
             max_attempts=max_attempts or self.options.max_attempts,
             idempotency_key=idempotency_key,
+            connection=connection,
         )
         return job_id
 
@@ -319,6 +326,7 @@ class PgQueue:
         idempotency_key: str | None = None,
         delay: float | timedelta | None = None,
         run_at: datetime | None = None,
+        connection: asyncpg.Connection | None = None,
     ) -> int:
         """Enqueue by task name, e.g. from a process that does not import the handler.
 
@@ -334,6 +342,7 @@ class PgQueue:
                 idempotency_key=idempotency_key,
                 delay=delay,
                 run_at=run_at,
+                connection=connection,
             )
         at, seconds = resolve_schedule(delay, run_at)
         job_id, _ = await self.store.insert(
@@ -345,6 +354,7 @@ class PgQueue:
             delay=seconds,
             max_attempts=max_attempts or DEFAULT_MAX_ATTEMPTS,
             idempotency_key=idempotency_key,
+            connection=connection,
         )
         return job_id
 

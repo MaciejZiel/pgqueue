@@ -144,3 +144,22 @@ def test_using_the_queue_before_connect_is_an_error() -> None:
     app = PgQueue("postgresql://localhost/unused")
     with pytest.raises(PgQueueError, match="not connected"):
         _ = app.store
+
+
+async def test_enqueue_joins_the_callers_transaction(app: PgQueue) -> None:
+    """Jobs enqueued in a rolled-back transaction never exist (transactional outbox)."""
+
+    @app.task()
+    async def send(payload: Email) -> None: ...
+
+    async with app.pool.acquire() as conn:
+        tx = conn.transaction()
+        await tx.start()
+        doomed = await send.enqueue(Email(to="rollback"), connection=conn)
+        await tx.rollback()
+
+        async with conn.transaction():
+            kept = await app.enqueue(send.name, {"to": "commit"}, connection=conn)
+
+    assert await app.get_job(doomed) is None
+    assert await app.get_job(kept) is not None
