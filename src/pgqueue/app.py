@@ -5,17 +5,36 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Concatenate, Self, get_type_hints, overload
 
+import asyncpg
 from pydantic import BaseModel, ValidationError
 
+from pgqueue.backoff import DEFAULT_RETRY_POLICY, RetryPolicy
+from pgqueue.cron import CronExpression
 from pgqueue.dsn import asyncpg_dsn
 from pgqueue.errors import PayloadError, PgQueueError, UnknownTaskError
 from pgqueue.models import Job, JobContext
+from pgqueue.periodic import PeriodicSchedule
 from pgqueue.store import JobPool, JobStore, create_pool
 
 DEFAULT_QUEUE = "default"
 DEFAULT_MAX_ATTEMPTS = 5
+
+
+def resolve_schedule(
+    delay: float | timedelta | None, run_at: datetime | None
+) -> tuple[datetime | None, float]:
+    """Normalise the two ways of scheduling a job to ``(run_at, delay_seconds)``."""
+    if delay is not None and run_at is not None:
+        raise ValueError("pass either delay or run_at, not both")
+    if run_at is not None and run_at.tzinfo is None:
+        raise ValueError("run_at must be timezone-aware")
+    seconds = delay.total_seconds() if isinstance(delay, timedelta) else float(delay or 0)
+    if seconds < 0:
+        raise ValueError("delay must be non-negative")
+    return run_at, seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +43,7 @@ class TaskOptions:
     priority: int = 0
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     timeout: float | None = None
+    retry: RetryPolicy = DEFAULT_RETRY_POLICY
 
 
 class Task[M: BaseModel | None]:
@@ -95,20 +115,33 @@ class Task[M: BaseModel | None]:
         priority: int | None = None,
         max_attempts: int | None = None,
         idempotency_key: str | None = None,
+        delay: float | timedelta | None = None,
+        run_at: datetime | None = None,
+        connection: asyncpg.Connection | None = None,
     ) -> int:
         """Add one job for this task and return its id.
 
+        ``delay`` (seconds or a timedelta) or ``run_at`` (an aware datetime)
+        schedule the job for later; until then it is invisible to workers.
+
         If ``idempotency_key`` is given and a job with that key already exists,
         no new job is created and the existing job's id is returned.
+
+        Pass an asyncpg ``connection`` with an open transaction to enqueue
+        atomically with your own writes: if the transaction rolls back, the
+        job never existed.
         """
+        at, seconds = resolve_schedule(delay, run_at)
         job_id, _ = await self.app.store.insert(
             queue=queue or self.options.queue,
             task=self.name,
             payload=self.dump_payload(payload),
             priority=self.options.priority if priority is None else priority,
-            run_at=None,
+            run_at=at,
+            delay=seconds,
             max_attempts=max_attempts or self.options.max_attempts,
             idempotency_key=idempotency_key,
+            connection=connection,
         )
         return job_id
 
@@ -120,15 +153,19 @@ class Task[M: BaseModel | None]:
         queue: str | None = None,
         priority: int | None = None,
         max_attempts: int | None = None,
+        delay: float | timedelta | None = None,
+        run_at: datetime | None = None,
     ) -> list[int]:
         """Add many jobs in a single INSERT; returns the ids actually created."""
+        at, seconds = resolve_schedule(delay, run_at)
         return await self.app.store.insert_many(
             queue=queue or self.options.queue,
             task=self.name,
             payloads=[self.dump_payload(p) for p in payloads],
             idempotency_keys=idempotency_keys,
             priority=self.options.priority if priority is None else priority,
-            run_at=None,
+            run_at=at,
+            delay=seconds,
             max_attempts=max_attempts or self.options.max_attempts,
         )
 
@@ -198,6 +235,7 @@ class PgQueue:
         self.pool_min_size = pool_min_size
         self.pool_max_size = pool_max_size
         self.tasks: dict[str, Task[Any]] = {}
+        self.schedules: dict[str, PeriodicSchedule] = {}
         self._pool: JobPool | None = None
         self._store: JobStore | None = None
 
@@ -245,19 +283,58 @@ class PgQueue:
         priority: int = 0,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         timeout: float | None = None,
+        retry: RetryPolicy | None = None,
     ) -> _TaskDecorator:
         """Register a handler as a task.
 
         The handler may be sync or async. Its first parameter, if any, must be
         annotated with a pydantic model -- that is the payload type. A parameter
         annotated with :class:`JobContext` receives job metadata.
+
+        Failed attempts are retried after ``retry`` backoff until
+        ``max_attempts`` is reached, after which the job is ``dead``.
         """
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         options = TaskOptions(
-            queue=queue, priority=priority, max_attempts=max_attempts, timeout=timeout
+            queue=queue,
+            priority=priority,
+            max_attempts=max_attempts,
+            timeout=timeout,
+            retry=retry or DEFAULT_RETRY_POLICY,
         )
         return _TaskDecorator(self, name, options)
+
+    def periodic[M: BaseModel | None](
+        self,
+        cron: str,
+        *,
+        name: str | None = None,
+        payload: M | dict[str, Any] | None = None,
+        queue: str | None = None,
+    ) -> Callable[[Task[M]], Task[M]]:
+        """Run a task on a cron schedule (UTC). Stack it on top of ``@app.task``::
+
+        @app.periodic("*/15 * * * *")
+        @app.task()
+        async def refresh_exchange_rates() -> None: ...
+        """
+        expression = CronExpression.parse(cron)
+
+        def decorate(task: Task[M]) -> Task[M]:
+            schedule_name = name or task.name
+            if schedule_name in self.schedules:
+                raise PgQueueError(f"periodic schedule {schedule_name!r} already exists")
+            self.schedules[schedule_name] = PeriodicSchedule(
+                name=schedule_name,
+                cron=expression,
+                task=task,
+                payload=task.dump_payload(payload),
+                queue=queue,
+            )
+            return task
+
+        return decorate
 
     def register(self, task: Task[Any]) -> None:
         if task.name in self.tasks:
@@ -281,6 +358,9 @@ class PgQueue:
         priority: int | None = None,
         max_attempts: int | None = None,
         idempotency_key: str | None = None,
+        delay: float | timedelta | None = None,
+        run_at: datetime | None = None,
+        connection: asyncpg.Connection | None = None,
     ) -> int:
         """Enqueue by task name, e.g. from a process that does not import the handler.
 
@@ -294,15 +374,21 @@ class PgQueue:
                 priority=priority,
                 max_attempts=max_attempts,
                 idempotency_key=idempotency_key,
+                delay=delay,
+                run_at=run_at,
+                connection=connection,
             )
+        at, seconds = resolve_schedule(delay, run_at)
         job_id, _ = await self.store.insert(
             queue=queue or DEFAULT_QUEUE,
             task=task,
             payload=payload or {},
             priority=priority or 0,
-            run_at=None,
+            run_at=at,
+            delay=seconds,
             max_attempts=max_attempts or DEFAULT_MAX_ATTEMPTS,
             idempotency_key=idempotency_key,
+            connection=connection,
         )
         return job_id
 

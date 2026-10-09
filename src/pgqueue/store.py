@@ -18,6 +18,7 @@ import asyncpg
 from asyncpg import Pool as JobPool
 
 from pgqueue.models import Job
+from pgqueue.schema import JobStatus
 
 __all__ = ["JobPool", "JobStore", "create_pool", "init_connection"]
 
@@ -39,14 +40,16 @@ async def create_pool(dsn: str, *, min_size: int = 1, max_size: int = 10) -> Job
 
 _INSERT = """
 INSERT INTO pgqueue_jobs (queue, task, payload, priority, run_at, max_attempts, idempotency_key)
-VALUES ($1, $2, $3, $4, COALESCE($5, now()), $6, $7)
+VALUES ($1, $2, $3, $4,
+        COALESCE($5::timestamptz, now() + make_interval(secs => $8::float8)), $6, $7)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING id
 """
 
 _INSERT_MANY = """
 INSERT INTO pgqueue_jobs (queue, task, payload, priority, run_at, max_attempts, idempotency_key)
-SELECT $1, $2, t.payload, $3, COALESCE($4, now()), $5, t.key
+SELECT $1, $2, t.payload, $3,
+       COALESCE($4::timestamptz, now() + make_interval(secs => $8::float8)), $5, t.key
 FROM unnest($6::jsonb[], $7::text[]) AS t(payload, key)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING id
@@ -92,6 +95,68 @@ SET status = 'succeeded',
 WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
 """
 
+# Same fencing as _COMPLETE. 'retrying' rows get a future run_at (the backoff)
+# and become claimable again once it passes; 'failed' and 'dead' are terminal.
+_FAIL = """
+UPDATE pgqueue_jobs
+SET status = $4::pgqueue_job_status,
+    run_at = CASE WHEN $4::pgqueue_job_status = 'retrying'
+                  THEN now() + make_interval(secs => $5::float8) ELSE run_at END,
+    last_error = $6::text,
+    locked_until = NULL,
+    finished_at = CASE WHEN $4::pgqueue_job_status = 'retrying' THEN NULL ELSE now() END
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
+"""
+
+# Graceful shutdown hands an unfinished job back without burning an attempt:
+# the handler did not fail, the process is just going away.
+_RELEASE = """
+UPDATE pgqueue_jobs
+SET status = 'queued',
+    attempts = attempts - 1,
+    run_at = now(),
+    locked_until = NULL,
+    last_error = 'released: worker ' || $2 || ' shut down before the job finished'
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
+"""
+
+# Extends the leases of the jobs a live worker is still running. Returns the
+# ids it still holds; anything missing was reaped and belongs to someone else.
+_HEARTBEAT = """
+UPDATE pgqueue_jobs
+SET locked_until = now() + make_interval(secs => $3::float8),
+    heartbeat_at = now()
+WHERE id = ANY($1::bigint[]) AND status = 'running' AND locked_by = $2
+RETURNING id
+"""
+
+# Stuck-job recovery. A running job whose lease expired belongs to a worker
+# that crashed, was SIGKILLed, lost its network or stalled its event loop.
+# The attempt counts (the handler may have run), so it is retried with the
+# usual budget or dead-lettered. SKIP LOCKED lets every worker run the reaper
+# without contending with each other.
+_REAP = """
+WITH expired AS (
+    SELECT id
+    FROM pgqueue_jobs
+    WHERE status = 'running' AND locked_until < now()
+    ORDER BY locked_until
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE pgqueue_jobs AS j
+SET status = CASE WHEN j.attempts >= j.max_attempts
+                  THEN 'dead'::pgqueue_job_status ELSE 'retrying'::pgqueue_job_status END,
+    run_at = now(),
+    locked_until = NULL,
+    finished_at = CASE WHEN j.attempts >= j.max_attempts THEN now() END,
+    last_error = 'lease expired: worker ' || j.locked_by
+                 || ' stopped heart-beating (crashed or stalled) during attempt ' || j.attempts
+FROM expired
+WHERE j.id = expired.id
+RETURNING j.id, j.status::text AS status, j.locked_by
+"""
+
 
 class JobStore:
     """Thin, stateless wrapper around the queue's SQL statements."""
@@ -109,32 +174,41 @@ class JobStore:
         run_at: datetime | None,
         max_attempts: int,
         idempotency_key: str | None,
+        delay: float = 0.0,
+        connection: asyncpg.Connection | None = None,
     ) -> tuple[int, bool]:
         """Insert one job; return ``(id, created)``.
 
         With an idempotency key that already exists, nothing is inserted and
         the id of the existing job is returned with ``created=False``.
+        ``run_at`` (absolute) wins over ``delay`` (seconds from the database's
+        clock, which avoids trusting the producer's clock).
+
+        Pass ``connection`` to enqueue inside your own transaction: the job
+        then becomes visible exactly when (and only if) that transaction
+        commits -- the transactional-outbox property a separate broker
+        cannot give you.
         """
+        args = (queue, task, payload, priority, run_at, max_attempts, idempotency_key, delay)
+        if connection is not None:
+            return await self._insert_on(connection, args, idempotency_key)
         async with self.pool.acquire() as conn:
-            job_id: int | None = await conn.fetchval(
-                _INSERT, queue, task, payload, priority, run_at, max_attempts, idempotency_key
-            )
+            return await self._insert_on(conn, args, idempotency_key)
+
+    @staticmethod
+    async def _insert_on(
+        conn: asyncpg.Connection, args: tuple[Any, ...], idempotency_key: str | None
+    ) -> tuple[int, bool]:
+        while True:
+            job_id: int | None = await conn.fetchval(_INSERT, *args)
             if job_id is not None:
                 return job_id, True
             existing: int | None = await conn.fetchval(
                 "SELECT id FROM pgqueue_jobs WHERE idempotency_key = $1", idempotency_key
             )
-            if existing is None:  # pragma: no cover - conflicting row deleted in between
-                return await self.insert(
-                    queue=queue,
-                    task=task,
-                    payload=payload,
-                    priority=priority,
-                    run_at=run_at,
-                    max_attempts=max_attempts,
-                    idempotency_key=idempotency_key,
-                )
-            return existing, False
+            if existing is not None:
+                return existing, False
+            # The conflicting row was deleted in between: try the insert again.
 
     async def insert_many(
         self,
@@ -146,13 +220,22 @@ class JobStore:
         priority: int,
         run_at: datetime | None,
         max_attempts: int,
+        delay: float = 0.0,
     ) -> list[int]:
         """Insert many jobs in one statement; return the ids that were created."""
         keys = list(idempotency_keys) if idempotency_keys is not None else [None] * len(payloads)
         if len(keys) != len(payloads):
             raise ValueError("idempotency_keys must be as long as payloads")
         rows = await self.pool.fetch(
-            _INSERT_MANY, queue, task, priority, run_at, max_attempts, list(payloads), keys
+            _INSERT_MANY,
+            queue,
+            task,
+            priority,
+            run_at,
+            max_attempts,
+            list(payloads),
+            keys,
+            delay,
         )
         return [row["id"] for row in rows]
 
@@ -172,6 +255,42 @@ class JobStore:
         """Mark a claimed job as succeeded. ``False`` means the lease was lost."""
         status = await self.pool.execute(_COMPLETE, job.id, worker_id, job.attempts, result)
         return bool(status == "UPDATE 1")
+
+    async def fail(
+        self,
+        job: Job,
+        worker_id: str,
+        *,
+        status: JobStatus,
+        error: str,
+        retry_in: float = 0.0,
+    ) -> bool:
+        """Record a failed attempt. ``False`` means the lease was lost."""
+        if status not in (JobStatus.RETRYING, JobStatus.FAILED, JobStatus.DEAD):
+            raise ValueError(f"not a failure status: {status}")
+        result = await self.pool.execute(
+            _FAIL, job.id, worker_id, job.attempts, status.value, retry_in, error
+        )
+        return bool(result == "UPDATE 1")
+
+    async def release(self, job: Job, worker_id: str) -> bool:
+        """Put a claimed job back in the queue without counting the attempt."""
+        result = await self.pool.execute(_RELEASE, job.id, worker_id, job.attempts)
+        return bool(result == "UPDATE 1")
+
+    async def heartbeat(
+        self, job_ids: Sequence[int], worker_id: str, *, lease_seconds: float
+    ) -> set[int]:
+        """Extend the leases of ``job_ids``; return the ids still held by ``worker_id``."""
+        if not job_ids:
+            return set()
+        rows = await self.pool.fetch(_HEARTBEAT, list(job_ids), worker_id, lease_seconds)
+        return {row["id"] for row in rows}
+
+    async def reap_expired(self, *, limit: int = 1000) -> list[tuple[int, JobStatus, str]]:
+        """Recover jobs whose lease expired; return ``(id, new status, old owner)``."""
+        rows = await self.pool.fetch(_REAP, limit)
+        return [(row["id"], JobStatus(row["status"]), row["locked_by"]) for row in rows]
 
     async def get(self, job_id: int) -> Job | None:
         row = await self.pool.fetchrow("SELECT * FROM pgqueue_jobs WHERE id = $1", job_id)

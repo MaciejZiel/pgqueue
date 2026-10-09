@@ -111,3 +111,22 @@ jobs = Table(
     # Dashboard: recent failures and throughput.
     Index("ix_pgqueue_jobs_status_finished", "status", "finished_at"),
 )
+
+# One row per cron schedule. Rows are upserted by workers on start-up; the row
+# lock taken when a schedule fires is what stops two workers firing it twice.
+periodic = Table(
+    "pgqueue_periodic",
+    metadata,
+    Column("name", Text, primary_key=True),
+    Column("cron", Text, nullable=False),
+    Column("task", Text, nullable=False),
+    Column("queue", Text, nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("next_run_at", DateTime(timezone=True), nullable=False),
+    Column("last_run_at", DateTime(timezone=True), nullable=True),
+    Column("last_job_id", BigInteger, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Channel the triggers from migration 0002 notify; the payload is the queue name.
+NOTIFY_CHANNEL = "pgqueue_jobs"
