@@ -108,6 +108,18 @@ SET status = $4::pgqueue_job_status,
 WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
 """
 
+# Graceful shutdown hands an unfinished job back without burning an attempt:
+# the handler did not fail, the process is just going away.
+_RELEASE = """
+UPDATE pgqueue_jobs
+SET status = 'queued',
+    attempts = attempts - 1,
+    run_at = now(),
+    locked_until = NULL,
+    last_error = 'released: worker ' || $2 || ' shut down before the job finished'
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
+"""
+
 
 class JobStore:
     """Thin, stateless wrapper around the queue's SQL statements."""
@@ -225,6 +237,11 @@ class JobStore:
         result = await self.pool.execute(
             _FAIL, job.id, worker_id, job.attempts, status.value, retry_in, error
         )
+        return bool(result == "UPDATE 1")
+
+    async def release(self, job: Job, worker_id: str) -> bool:
+        """Put a claimed job back in the queue without counting the attempt."""
+        result = await self.pool.execute(_RELEASE, job.id, worker_id, job.attempts)
         return bool(result == "UPDATE 1")
 
     async def get(self, job_id: int) -> Job | None:
