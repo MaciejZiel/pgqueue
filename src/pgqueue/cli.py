@@ -65,7 +65,21 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--shutdown-timeout", type=float, default=30.0)
     worker.add_argument("--no-listen", action="store_true", help="poll only, no LISTEN/NOTIFY")
     worker.add_argument("--no-periodic", action="store_true", help="do not fire periodic schedules")
+    admin = commands.add_parser("admin", help="serve the admin API, dashboard and /metrics")
+    admin.add_argument("--dsn", help="database URL (default: $PGQUEUE_DSN)")
+    admin.add_argument("--host", default="127.0.0.1")
+    admin.add_argument("--port", type=int, default=8080)
     return parser
+
+
+def serve_admin(dsn: str, host: str, port: int) -> None:
+    try:
+        import uvicorn  # noqa: PLC0415 - optional dependency
+
+        from pgqueue.admin import create_app  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover
+        raise SystemExit("the admin needs the extra: pip install 'pgqueue[admin]'") from exc
+    uvicorn.run(create_app(dsn), host=host, port=port, log_level="info", access_log=False)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -90,3 +104,5 @@ def main(argv: Sequence[str] | None = None) -> None:
             run_periodic=not args.no_periodic,
         )
         asyncio.run(run_worker(worker))
+    elif args.command == "admin":
+        serve_admin(_dsn(args.dsn), args.host, args.port)
