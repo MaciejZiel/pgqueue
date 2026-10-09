@@ -73,3 +73,4 @@ def test_load_app_errors() -> None:
 def test_parser_defaults() -> None:
     args = build_parser().parse_args(["worker", "x:app", "-q", "a,b", "-c", "50"])
     assert (args.queues, args.concurrency, args.lease, args.no_listen) == ("a,b", 50, 30.0, False)
+    assert args.metrics_port is None

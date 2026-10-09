@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import socket
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -96,6 +97,9 @@ class Worker:
         self._stopping = asyncio.Event()
         self._executor: ThreadPoolExecutor | None = None
         self._background: list[asyncio.Task[None]] = []
+        # Called as hook(job, outcome, seconds) after every attempt; outcome is
+        # succeeded, retrying, failed, dead or released. Used for metrics.
+        self.on_job_done: list[Callable[[Job, str, float], None]] = []
 
     # -- control ------------------------------------------------------------------------------
 
@@ -268,17 +272,28 @@ class Worker:
     # -- running one job ---------------------------------------------------------------------
 
     async def _execute(self, job: Job) -> None:
+        started = time.perf_counter()
         try:
             result = await self._invoke(job)
         except asyncio.CancelledError:
             await self._release(job)
+            self._notify_hooks(job, "released", time.perf_counter() - started)
             raise
         except Exception as exc:
             self.failed += 1
-            await self._record_failure(job, exc)
+            status = await self._record_failure(job, exc)
+            self._notify_hooks(job, status.value, time.perf_counter() - started)
         else:
             self.processed += 1
             await self._record_success(job, result)
+            self._notify_hooks(job, JobStatus.SUCCEEDED.value, time.perf_counter() - started)
+
+    def _notify_hooks(self, job: Job, outcome: str, seconds: float) -> None:
+        for hook in self.on_job_done:
+            try:
+                hook(job, outcome, seconds)
+            except Exception:
+                log.exception("on_job_done hook %r failed", hook)
 
     async def _invoke(self, job: Job) -> Any:
         task: Task[Any] = self.app.get_task(job.task)
@@ -309,7 +324,7 @@ class Worker:
         if not stored:
             log.warning("job %d finished after its lease was lost; result discarded", job.id)
 
-    async def _record_failure(self, job: Job, exc: Exception) -> None:
+    async def _record_failure(self, job: Job, exc: Exception) -> JobStatus:
         task = self.app.tasks.get(job.task)
         policy = task.options.retry if task is not None else DEFAULT_RETRY_POLICY
         outcome = decide_failure(job, exc, policy)
@@ -334,6 +349,7 @@ class Worker:
             )
         except Exception:
             log.exception("could not record failure of job %d; its lease will expire", job.id)
+        return outcome.status
 
     async def _release(self, job: Job) -> None:
         try:

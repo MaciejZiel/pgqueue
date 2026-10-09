@@ -65,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--shutdown-timeout", type=float, default=30.0)
     worker.add_argument("--no-listen", action="store_true", help="poll only, no LISTEN/NOTIFY")
     worker.add_argument("--no-periodic", action="store_true", help="do not fire periodic schedules")
+    worker.add_argument(
+        "--metrics-port", type=int, help="export Prometheus worker metrics on this port"
+    )
+
     admin = commands.add_parser("admin", help="serve the admin API, dashboard and /metrics")
     admin.add_argument("--dsn", help="database URL (default: $PGQUEUE_DSN)")
     admin.add_argument("--host", default="127.0.0.1")
@@ -103,6 +107,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             listen=not args.no_listen,
             run_periodic=not args.no_periodic,
         )
+        if args.metrics_port:
+            from pgqueue.prometheus import WorkerMetrics  # noqa: PLC0415 - optional extra
+
+            WorkerMetrics(worker).serve(args.metrics_port)
         asyncio.run(run_worker(worker))
     elif args.command == "admin":
         serve_admin(_dsn(args.dsn), args.host, args.port)

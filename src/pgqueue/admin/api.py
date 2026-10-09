@@ -10,14 +10,16 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from pgqueue import __version__
 from pgqueue.admin import queries
+from pgqueue.admin.metrics import render as render_metrics
 from pgqueue.admin.schemas import JobOut, JobPage, Overview, RequeueResult
 from pgqueue.dsn import sqlalchemy_url
 from pgqueue.schema import JobStatus
@@ -173,6 +175,17 @@ def create_app(
     @app.get("/", include_in_schema=False, dependencies=[Depends(_authenticate)])
     async def dashboard(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(request, "dashboard.html", {"version": __version__})
+
+    @app.get(
+        "/metrics",
+        include_in_schema=False,
+        dependencies=[Depends(_authenticate)],
+        response_class=PlainTextResponse,
+    )
+    async def metrics() -> PlainTextResponse:
+        async with engine.connect() as conn:
+            body = await render_metrics(conn)
+        return PlainTextResponse(body, media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
