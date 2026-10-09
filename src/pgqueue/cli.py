@@ -47,6 +47,11 @@ async def run_worker(worker: Worker) -> None:
         await worker.app.close()
 
 
+async def prune(dsn: str, older_than_seconds: float) -> int:
+    async with PgQueue(dsn) as app:
+        return await app.store.prune(older_than_seconds=older_than_seconds)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pgqueue", description=__doc__)
     parser.add_argument("--log-level", default=os.environ.get("PGQUEUE_LOG_LEVEL", "INFO"))
@@ -67,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--no-periodic", action="store_true", help="do not fire periodic schedules")
     worker.add_argument(
         "--metrics-port", type=int, help="export Prometheus worker metrics on this port"
+    )
+
+    prune = commands.add_parser("prune", help="delete finished jobs older than a cutoff")
+    prune.add_argument("--dsn", help="database URL (default: $PGQUEUE_DSN)")
+    prune.add_argument(
+        "--older-than-days", type=float, default=7.0, help="age of finished jobs to delete"
     )
 
     admin = commands.add_parser("admin", help="serve the admin API, dashboard and /metrics")
@@ -112,5 +123,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
             WorkerMetrics(worker).serve(args.metrics_port)
         asyncio.run(run_worker(worker))
+    elif args.command == "prune":
+        deleted = asyncio.run(prune(_dsn(args.dsn), args.older_than_days * 86400))
+        log.info("deleted %d finished job(s)", deleted)
     elif args.command == "admin":
         serve_admin(_dsn(args.dsn), args.host, args.port)

@@ -340,6 +340,34 @@ class JobStore:
         )
         return int(result.split()[-1])
 
+    async def prune(self, *, older_than_seconds: float, batch_size: int = 5000) -> int:
+        """Delete finished jobs older than the cutoff, in batches; return how many.
+
+        Terminal rows are history: they keep the table and its indexes
+        growing and keep idempotency keys reserved. Batching keeps each
+        transaction (and the locks and WAL it produces) small.
+        """
+        total = 0
+        while True:
+            result = await self.pool.execute(
+                """
+                DELETE FROM pgqueue_jobs
+                WHERE id IN (
+                    SELECT id FROM pgqueue_jobs
+                    WHERE status IN ('succeeded', 'failed', 'dead')
+                      AND finished_at < now() - make_interval(secs => $1::float8)
+                    LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+                )
+                """,
+                older_than_seconds,
+                batch_size,
+            )
+            deleted = int(result.split()[-1])
+            total += deleted
+            if deleted < batch_size:
+                return total
+
     async def get(self, job_id: int) -> Job | None:
         row = await self.pool.fetchrow("SELECT * FROM pgqueue_jobs WHERE id = $1", job_id)
         return Job.from_record(row) if row is not None else None
