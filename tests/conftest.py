@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
+from pgqueue import PgQueue
 from pgqueue.migrate import upgrade
 
 TEST_DSN = os.environ.get(
@@ -61,3 +63,10 @@ async def clean_db(database: str) -> str:
     finally:
         await conn.close()
     return database
+
+
+@pytest_asyncio.fixture
+async def app(clean_db: str) -> AsyncIterator[PgQueue]:
+    queue = PgQueue(clean_db)
+    async with queue:
+        yield queue
