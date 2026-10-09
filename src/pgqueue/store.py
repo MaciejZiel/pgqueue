@@ -52,6 +52,46 @@ ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING id
 """
 
+# The heart of the queue. The CTE locks up to $2 ready rows; SKIP LOCKED makes
+# concurrent claimers pass over rows another transaction already holds instead
+# of blocking on them, so N workers never receive the same row and never wait
+# for each other. The outer UPDATE flips the rows to 'running' and stamps the
+# lease in the same statement, so a claim is a single round trip.
+_CLAIM = """
+WITH next AS (
+    SELECT id
+    FROM pgqueue_jobs
+    WHERE status IN ('queued', 'retrying')
+      AND queue = ANY($1::text[])
+      AND run_at <= now()
+    ORDER BY priority DESC, run_at, id
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE pgqueue_jobs AS j
+SET status = 'running',
+    attempts = j.attempts + 1,
+    locked_by = $3,
+    locked_until = now() + make_interval(secs => $4),
+    heartbeat_at = now(),
+    started_at = now()
+FROM next
+WHERE j.id = next.id
+RETURNING j.*
+"""
+
+# Fencing: a completion is only accepted from the worker that holds the
+# *current* lease for the *current* attempt. A worker whose lease expired and
+# whose job was re-claimed elsewhere matches zero rows and must drop its result.
+_COMPLETE = """
+UPDATE pgqueue_jobs
+SET status = 'succeeded',
+    result = $4,
+    locked_until = NULL,
+    finished_at = now()
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
+"""
+
 
 class JobStore:
     """Thin, stateless wrapper around the queue's SQL statements."""
@@ -115,6 +155,23 @@ class JobStore:
             _INSERT_MANY, queue, task, priority, run_at, max_attempts, list(payloads), keys
         )
         return [row["id"] for row in rows]
+
+    async def claim(
+        self, queues: Sequence[str], *, limit: int, worker_id: str, lease_seconds: float
+    ) -> list[Job]:
+        """Atomically take up to ``limit`` ready jobs and lease them to ``worker_id``."""
+        if limit <= 0:
+            return []
+        rows = await self.pool.fetch(_CLAIM, list(queues), limit, worker_id, lease_seconds)
+        jobs = [Job.from_record(row) for row in rows]
+        # UPDATE ... RETURNING does not preserve the CTE's order.
+        jobs.sort(key=lambda j: (-j.priority, j.run_at, j.id))
+        return jobs
+
+    async def complete(self, job: Job, worker_id: str, result: Any = None) -> bool:
+        """Mark a claimed job as succeeded. ``False`` means the lease was lost."""
+        status = await self.pool.execute(_COMPLETE, job.id, worker_id, job.attempts, result)
+        return bool(status == "UPDATE 1")
 
     async def get(self, job_id: int) -> Job | None:
         row = await self.pool.fetchrow("SELECT * FROM pgqueue_jobs WHERE id = $1", job_id)
