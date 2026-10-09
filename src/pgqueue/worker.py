@@ -23,7 +23,7 @@ import os
 import signal
 import socket
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -56,11 +56,15 @@ class Worker:
         lease_seconds: float = 30.0,
         shutdown_timeout: float = 30.0,
         worker_id: str | None = None,
+        heartbeat_interval: float | None = None,
+        reap_interval: float | None = None,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         if not queues:
             raise ValueError("at least one queue is required")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         self.app = app
         self.queues = list(queues)
         self.concurrency = concurrency
@@ -68,6 +72,10 @@ class Worker:
         self.lease_seconds = lease_seconds
         self.shutdown_timeout = shutdown_timeout
         self.id = worker_id or default_worker_id()
+        # Three heartbeats per lease: one can be lost or late without the
+        # lease expiring under a healthy worker.
+        self.heartbeat_interval = heartbeat_interval or lease_seconds / 3
+        self.reap_interval = reap_interval or lease_seconds / 2
 
         self.processed = 0
         self.failed = 0
@@ -75,6 +83,7 @@ class Worker:
         self._wakeup = asyncio.Event()
         self._stopping = asyncio.Event()
         self._executor: ThreadPoolExecutor | None = None
+        self._background: list[asyncio.Task[None]] = []
 
     # -- control ------------------------------------------------------------------------------
 
@@ -120,10 +129,18 @@ class Worker:
         log.info(
             "worker %s started: queues=%s concurrency=%d", self.id, self.queues, self.concurrency
         )
+        self._background = [
+            asyncio.create_task(self._every(self.heartbeat_interval, self._heartbeat)),
+            asyncio.create_task(self._every(self.reap_interval, self._reap)),
+        ]
         try:
             await self._loop()
         finally:
+            # Leases keep being extended while in-flight jobs drain.
             await self._drain()
+            for task in self._background:
+                task.cancel()
+            await asyncio.gather(*self._background, return_exceptions=True)
             self._executor.shutdown(wait=False, cancel_futures=True)
             log.info(
                 "worker %s stopped: processed=%d failed=%d", self.id, self.processed, self.failed
@@ -176,6 +193,35 @@ class Worker:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+
+    # -- leases ------------------------------------------------------------------------------
+
+    async def _every(self, interval: float, action: Callable[[], Awaitable[None]]) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await action()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("background %s failed; will retry", action.__name__)
+
+    async def _heartbeat(self) -> None:
+        jobs = {job.id: job for job in self._running.values()}
+        if not jobs:
+            return
+        held = await self.app.store.heartbeat(list(jobs), self.id, lease_seconds=self.lease_seconds)
+        for job_id in jobs.keys() - held:
+            log.warning(
+                "lost the lease on job %d (%s); its outcome will be discarded",
+                job_id,
+                jobs[job_id].task,
+            )
+
+    async def _reap(self) -> None:
+        for job_id, status, owner in await self.app.store.reap_expired():
+            log.warning("recovered job %d from %s -> %s", job_id, owner, status.value)
+        self._wakeup.set()
 
     # -- running one job ---------------------------------------------------------------------
 

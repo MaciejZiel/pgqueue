@@ -120,6 +120,43 @@ SET status = 'queued',
 WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
 """
 
+# Extends the leases of the jobs a live worker is still running. Returns the
+# ids it still holds; anything missing was reaped and belongs to someone else.
+_HEARTBEAT = """
+UPDATE pgqueue_jobs
+SET locked_until = now() + make_interval(secs => $3::float8),
+    heartbeat_at = now()
+WHERE id = ANY($1::bigint[]) AND status = 'running' AND locked_by = $2
+RETURNING id
+"""
+
+# Stuck-job recovery. A running job whose lease expired belongs to a worker
+# that crashed, was SIGKILLed, lost its network or stalled its event loop.
+# The attempt counts (the handler may have run), so it is retried with the
+# usual budget or dead-lettered. SKIP LOCKED lets every worker run the reaper
+# without contending with each other.
+_REAP = """
+WITH expired AS (
+    SELECT id
+    FROM pgqueue_jobs
+    WHERE status = 'running' AND locked_until < now()
+    ORDER BY locked_until
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE pgqueue_jobs AS j
+SET status = CASE WHEN j.attempts >= j.max_attempts
+                  THEN 'dead'::pgqueue_job_status ELSE 'retrying'::pgqueue_job_status END,
+    run_at = now(),
+    locked_until = NULL,
+    finished_at = CASE WHEN j.attempts >= j.max_attempts THEN now() END,
+    last_error = 'lease expired: worker ' || j.locked_by
+                 || ' stopped heart-beating (crashed or stalled) during attempt ' || j.attempts
+FROM expired
+WHERE j.id = expired.id
+RETURNING j.id, j.status::text AS status, j.locked_by
+"""
+
 
 class JobStore:
     """Thin, stateless wrapper around the queue's SQL statements."""
@@ -243,6 +280,20 @@ class JobStore:
         """Put a claimed job back in the queue without counting the attempt."""
         result = await self.pool.execute(_RELEASE, job.id, worker_id, job.attempts)
         return bool(result == "UPDATE 1")
+
+    async def heartbeat(
+        self, job_ids: Sequence[int], worker_id: str, *, lease_seconds: float
+    ) -> set[int]:
+        """Extend the leases of ``job_ids``; return the ids still held by ``worker_id``."""
+        if not job_ids:
+            return set()
+        rows = await self.pool.fetch(_HEARTBEAT, list(job_ids), worker_id, lease_seconds)
+        return {row["id"] for row in rows}
+
+    async def reap_expired(self, *, limit: int = 1000) -> list[tuple[int, JobStatus, str]]:
+        """Recover jobs whose lease expired; return ``(id, new status, old owner)``."""
+        rows = await self.pool.fetch(_REAP, limit)
+        return [(row["id"], JobStatus(row["status"]), row["locked_by"]) for row in rows]
 
     async def get(self, job_id: int) -> Job | None:
         row = await self.pool.fetchrow("SELECT * FROM pgqueue_jobs WHERE id = $1", job_id)
