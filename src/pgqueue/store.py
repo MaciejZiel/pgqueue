@@ -10,6 +10,8 @@ correctness argument, so it should be readable as SQL.
 from __future__ import annotations
 
 import json
+import os
+import socket
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -291,6 +293,80 @@ class JobStore:
         """Recover jobs whose lease expired; return ``(id, new status, old owner)``."""
         rows = await self.pool.fetch(_REAP, limit)
         return [(row["id"], JobStatus(row["status"]), row["locked_by"]) for row in rows]
+
+    # -- worker registry ------------------------------------------------------------------
+
+    async def register_worker(
+        self, worker_id: str, *, queues: Sequence[str], concurrency: int, lease_seconds: float
+    ) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO pgqueue_workers (id, hostname, pid, queues, concurrency, lease_seconds)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (id) DO UPDATE SET last_seen_at = now()
+            """,
+            worker_id,
+            socket.gethostname(),
+            os.getpid(),
+            list(queues),
+            concurrency,
+            lease_seconds,
+        )
+
+    async def touch_worker(
+        self, worker_id: str, *, in_flight: int, processed: int, failed: int
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE pgqueue_workers
+            SET last_seen_at = now(), in_flight = $2, processed = $3, failed = $4
+            WHERE id = $1
+            """,
+            worker_id,
+            in_flight,
+            processed,
+            failed,
+        )
+
+    async def deregister_worker(self, worker_id: str) -> None:
+        await self.pool.execute("DELETE FROM pgqueue_workers WHERE id = $1", worker_id)
+
+    async def prune_workers(self, older_than_seconds: float = 3600) -> int:
+        """Forget workers that died without deregistering a long time ago."""
+        result = await self.pool.execute(
+            "DELETE FROM pgqueue_workers "
+            "WHERE last_seen_at < now() - make_interval(secs => $1::float8)",
+            older_than_seconds,
+        )
+        return int(result.split()[-1])
+
+    async def prune(self, *, older_than_seconds: float, batch_size: int = 5000) -> int:
+        """Delete finished jobs older than the cutoff, in batches; return how many.
+
+        Terminal rows are history: they keep the table and its indexes
+        growing and keep idempotency keys reserved. Batching keeps each
+        transaction (and the locks and WAL it produces) small.
+        """
+        total = 0
+        while True:
+            result = await self.pool.execute(
+                """
+                DELETE FROM pgqueue_jobs
+                WHERE id IN (
+                    SELECT id FROM pgqueue_jobs
+                    WHERE status IN ('succeeded', 'failed', 'dead')
+                      AND finished_at < now() - make_interval(secs => $1::float8)
+                    LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+                )
+                """,
+                older_than_seconds,
+                batch_size,
+            )
+            deleted = int(result.split()[-1])
+            total += deleted
+            if deleted < batch_size:
+                return total
 
     async def get(self, job_id: int) -> Job | None:
         row = await self.pool.fetchrow("SELECT * FROM pgqueue_jobs WHERE id = $1", job_id)

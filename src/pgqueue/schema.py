@@ -15,6 +15,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum,
+    Float,
     Identity,
     Index,
     Integer,
@@ -25,7 +26,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 
 class JobStatus(enum.StrEnum):
@@ -126,6 +127,25 @@ periodic = Table(
     Column("last_run_at", DateTime(timezone=True), nullable=True),
     Column("last_job_id", BigInteger, nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+# Live workers, for the dashboard. Each worker upserts its row on every
+# heartbeat and deletes it on a clean shutdown; a row that stops being
+# refreshed belongs to a worker that died.
+workers = Table(
+    "pgqueue_workers",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("hostname", Text, nullable=False),
+    Column("pid", Integer, nullable=False),
+    Column("queues", ARRAY(Text), nullable=False),
+    Column("concurrency", Integer, nullable=False),
+    Column("lease_seconds", Float, nullable=False),
+    Column("in_flight", Integer, nullable=False, server_default="0"),
+    Column("processed", BigInteger, nullable=False, server_default="0"),
+    Column("failed", BigInteger, nullable=False, server_default="0"),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 # Channel the triggers from migration 0002 notify; the payload is the queue name.

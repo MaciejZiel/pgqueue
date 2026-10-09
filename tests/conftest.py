@@ -48,7 +48,7 @@ async def database() -> str:
     return TEST_DSN
 
 
-TABLES = ("pgqueue_jobs", "pgqueue_periodic")
+TABLES = ("pgqueue_jobs", "pgqueue_periodic", "pgqueue_workers")
 
 
 @pytest_asyncio.fixture

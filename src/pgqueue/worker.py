@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import socket
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -96,6 +97,9 @@ class Worker:
         self._stopping = asyncio.Event()
         self._executor: ThreadPoolExecutor | None = None
         self._background: list[asyncio.Task[None]] = []
+        # Called as hook(job, outcome, seconds) after every attempt; outcome is
+        # succeeded, retrying, failed, dead or released. Used for metrics.
+        self.on_job_done: list[Callable[[Job, str, float], None]] = []
 
     # -- control ------------------------------------------------------------------------------
 
@@ -142,6 +146,12 @@ class Worker:
         self._executor = ThreadPoolExecutor(
             max_workers=self.concurrency, thread_name_prefix="pgqueue-sync"
         )
+        await self.app.store.register_worker(
+            self.id,
+            queues=self.queues,
+            concurrency=self.concurrency,
+            lease_seconds=self.lease_seconds,
+        )
         log.info(
             "worker %s started: queues=%s concurrency=%d", self.id, self.queues, self.concurrency
         )
@@ -165,6 +175,8 @@ class Worker:
                 task.cancel()
             await asyncio.gather(*self._background, return_exceptions=True)
             self._executor.shutdown(wait=False, cancel_futures=True)
+            with contextlib.suppress(Exception):
+                await self.app.store.deregister_worker(self.id)
             log.info(
                 "worker %s stopped: processed=%d failed=%d", self.id, self.processed, self.failed
             )
@@ -207,12 +219,15 @@ class Worker:
         self._wakeup.set()  # a slot is free
 
     async def _drain(self) -> None:
-        if not self._running:
-            return
-        tasks = list(self._running)
-        _, pending = await asyncio.wait(tasks, timeout=self.shutdown_timeout or None)
-        if pending and self.shutdown_timeout:
-            log.warning("shutdown timeout: releasing %d unfinished job(s)", len(pending))
+        """Wait for in-flight jobs until they finish, the timeout passes or a forced stop."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.shutdown_timeout
+        pending = set(self._running)
+        while pending and self.shutdown_timeout > 0 and loop.time() < deadline:
+            # Short slices so a second signal (shutdown_timeout = 0) takes effect quickly.
+            _, pending = await asyncio.wait(pending, timeout=min(0.1, deadline - loop.time()))
+        if pending:
+            log.warning("releasing %d unfinished job(s)", len(pending))
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
@@ -230,6 +245,9 @@ class Worker:
                 log.exception("background %s failed; will retry", action.__name__)
 
     async def _heartbeat(self) -> None:
+        await self.app.store.touch_worker(
+            self.id, in_flight=self.in_flight, processed=self.processed, failed=self.failed
+        )
         jobs = {job.id: job for job in self._running.values()}
         if not jobs:
             return
@@ -244,6 +262,7 @@ class Worker:
     async def _reap(self) -> None:
         for job_id, status, owner in await self.app.store.reap_expired():
             log.warning("recovered job %d from %s -> %s", job_id, owner, status.value)
+        await self.app.store.prune_workers()
         self._wakeup.set()
 
     async def _fire_periodic(self) -> None:
@@ -253,17 +272,28 @@ class Worker:
     # -- running one job ---------------------------------------------------------------------
 
     async def _execute(self, job: Job) -> None:
+        started = time.perf_counter()
         try:
             result = await self._invoke(job)
         except asyncio.CancelledError:
             await self._release(job)
+            self._notify_hooks(job, "released", time.perf_counter() - started)
             raise
         except Exception as exc:
             self.failed += 1
-            await self._record_failure(job, exc)
+            status = await self._record_failure(job, exc)
+            self._notify_hooks(job, status.value, time.perf_counter() - started)
         else:
             self.processed += 1
             await self._record_success(job, result)
+            self._notify_hooks(job, JobStatus.SUCCEEDED.value, time.perf_counter() - started)
+
+    def _notify_hooks(self, job: Job, outcome: str, seconds: float) -> None:
+        for hook in self.on_job_done:
+            try:
+                hook(job, outcome, seconds)
+            except Exception:
+                log.exception("on_job_done hook %r failed", hook)
 
     async def _invoke(self, job: Job) -> Any:
         task: Task[Any] = self.app.get_task(job.task)
@@ -294,7 +324,7 @@ class Worker:
         if not stored:
             log.warning("job %d finished after its lease was lost; result discarded", job.id)
 
-    async def _record_failure(self, job: Job, exc: Exception) -> None:
+    async def _record_failure(self, job: Job, exc: Exception) -> JobStatus:
         task = self.app.tasks.get(job.task)
         policy = task.options.retry if task is not None else DEFAULT_RETRY_POLICY
         outcome = decide_failure(job, exc, policy)
@@ -319,6 +349,7 @@ class Worker:
             )
         except Exception:
             log.exception("could not record failure of job %d; its lease will expire", job.id)
+        return outcome.status
 
     async def _release(self, job: Job) -> None:
         try:
