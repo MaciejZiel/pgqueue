@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pgqueue · dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%233b7ddd'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{ url_for('static', path='dashboard.css') }}?v={{ version }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <span class="name">pgqueue</span>
+      <span class="version">v{{ version }}</span>
+    </div>
+    <div class="status">
+      <span id="live-dot" class="dot"></span>
+      <span id="live-text">connecting…</span>
+      <button id="pause" class="ghost" type="button" aria-pressed="false">Pause</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="kpis" aria-label="Totals">
+      <div class="kpi"><span class="label">Queued</span><span class="value" id="kpi-ready">–</span></div>
+      <div class="kpi"><span class="label">Running</span><span class="value running" id="kpi-running">–</span></div>
+      <div class="kpi"><span class="label">Retrying</span><span class="value retrying" id="kpi-retrying">–</span></div>
+      <div class="kpi"><span class="label">Failed</span><span class="value failed" id="kpi-failed">–</span></div>
+      <div class="kpi"><span class="label">Dead</span><span class="value failed" id="kpi-dead">–</span></div>
+      <div class="kpi"><span class="label">Succeeded / min</span><span class="value succeeded" id="kpi-rate">–</span></div>
+      <div class="kpi"><span class="label">Workers</span><span class="value" id="kpi-workers">–</span></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Throughput <span class="muted">· finished jobs per minute, last hour</span></h2>
+        <div class="legend">
+          <span><i class="swatch succeeded"></i>succeeded</span>
+          <span><i class="swatch failed"></i>failed / dead</span>
+        </div>
+      </div>
+      <div class="chart" id="chart" role="img" aria-label="Throughput chart"></div>
+    </section>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head"><h2>Queues</h2></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Queue</th><th class="num">Queued</th><th class="num">Running</th>
+                <th class="num">Retrying</th><th class="num">Succeeded</th>
+                <th class="num">Failed</th><th class="num">Dead</th><th class="num">Lag</th>
+              </tr>
+            </thead>
+            <tbody id="queues"><tr><td colspan="8" class="empty">No jobs yet</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Workers</h2></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Worker</th><th>Queues</th><th>Busy</th>
+                <th class="num">Processed</th><th class="num">Failed</th><th class="num">Seen</th>
+              </tr>
+            </thead>
+            <tbody id="workers"><tr><td colspan="6" class="empty">No workers running</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Problems</h2>
+        <div class="tabs" role="tablist">
+          <button type="button" role="tab" data-status="dead" aria-selected="true">Dead</button>
+          <button type="button" role="tab" data-status="failed" aria-selected="false">Failed</button>
+          <button type="button" role="tab" data-status="retrying" aria-selected="false">Retrying</button>
+        </div>
+      </div>
+      <div class="bulk" id="bulk"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="num">Job</th><th>Task</th><th>Queue</th><th class="num">Attempts</th>
+              <th>Last error</th><th class="num">When</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="problems"><tr><td colspan="7" class="empty">Nothing here</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Periodic schedules</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Cron (UTC)</th><th>Task</th><th>Queue</th><th class="num">Next run</th><th class="num">Last run</th></tr>
+          </thead>
+          <tbody id="periodic"><tr><td colspan="6" class="empty">No schedules</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <aside id="drawer" class="drawer" hidden aria-labelledby="drawer-title">
+    <div class="drawer-head">
+      <h2 id="drawer-title">Job</h2>
+      <button type="button" class="ghost" id="drawer-close" aria-label="Close">✕</button>
+    </div>
+    <dl id="drawer-meta" class="meta"></dl>
+    <h3>Payload</h3>
+    <pre id="drawer-payload"></pre>
+    <h3>Result</h3>
+    <pre id="drawer-result"></pre>
+    <h3>Last error</h3>
+    <pre id="drawer-error" class="error"></pre>
+  </aside>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="{{ url_for('static', path='dashboard.js') }}?v={{ version }}"></script>
+</body>
+</html>

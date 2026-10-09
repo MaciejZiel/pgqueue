@@ -145,3 +145,15 @@ async def test_basic_auth(app: PgQueue) -> None:
         assert (await right.get("/api/overview")).status == 200
     finally:
         await admin_app.state.engine.dispose()
+
+
+async def test_dashboard_page_and_assets_are_served(client: Client) -> None:
+    page = await client.get("/")
+    assert page.status == 200
+    assert page.headers["content-type"].startswith("text/html")
+    assert "pgqueue" in page.text
+    assert "/static/dashboard.js" in page.text
+
+    script = await client.get("/static/dashboard.js")
+    assert script.status == 200
+    assert "X-PgQueue-Action" in script.text  # the dashboard sends the CSRF header

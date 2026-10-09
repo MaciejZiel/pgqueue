@@ -6,10 +6,14 @@ import os
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from pgqueue import __version__
@@ -24,6 +28,9 @@ from pgqueue.schema import JobStatus
 CSRF_HEADER = "X-PgQueue-Action"
 
 _basic = HTTPBasic(auto_error=False)
+
+HERE = Path(__file__).parent
+templates = Jinja2Templates(directory=HERE / "templates")
 
 
 def _engine(request: Request) -> AsyncEngine:
@@ -161,6 +168,11 @@ def create_app(
     app.state.engine = engine
     app.state.credentials = (username, password) if username and password else None
     app.include_router(api)
+    app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+
+    @app.get("/", include_in_schema=False, dependencies=[Depends(_authenticate)])
+    async def dashboard(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(request, "dashboard.html", {"version": __version__})
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
