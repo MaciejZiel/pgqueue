@@ -18,6 +18,7 @@ import asyncpg
 from asyncpg import Pool as JobPool
 
 from pgqueue.models import Job
+from pgqueue.schema import JobStatus
 
 __all__ = ["JobPool", "JobStore", "create_pool", "init_connection"]
 
@@ -89,6 +90,19 @@ SET status = 'succeeded',
     result = $4,
     locked_until = NULL,
     finished_at = now()
+WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
+"""
+
+# Same fencing as _COMPLETE. 'retrying' rows get a future run_at (the backoff)
+# and become claimable again once it passes; 'failed' and 'dead' are terminal.
+_FAIL = """
+UPDATE pgqueue_jobs
+SET status = $4::pgqueue_job_status,
+    run_at = CASE WHEN $4::pgqueue_job_status = 'retrying'
+                  THEN now() + make_interval(secs => $5::float8) ELSE run_at END,
+    last_error = $6::text,
+    locked_until = NULL,
+    finished_at = CASE WHEN $4::pgqueue_job_status = 'retrying' THEN NULL ELSE now() END
 WHERE id = $1 AND status = 'running' AND locked_by = $2 AND attempts = $3
 """
 
@@ -172,6 +186,23 @@ class JobStore:
         """Mark a claimed job as succeeded. ``False`` means the lease was lost."""
         status = await self.pool.execute(_COMPLETE, job.id, worker_id, job.attempts, result)
         return bool(status == "UPDATE 1")
+
+    async def fail(
+        self,
+        job: Job,
+        worker_id: str,
+        *,
+        status: JobStatus,
+        error: str,
+        retry_in: float = 0.0,
+    ) -> bool:
+        """Record a failed attempt. ``False`` means the lease was lost."""
+        if status not in (JobStatus.RETRYING, JobStatus.FAILED, JobStatus.DEAD):
+            raise ValueError(f"not a failure status: {status}")
+        result = await self.pool.execute(
+            _FAIL, job.id, worker_id, job.attempts, status.value, retry_in, error
+        )
+        return bool(result == "UPDATE 1")
 
     async def get(self, job_id: int) -> Job | None:
         row = await self.pool.fetchrow("SELECT * FROM pgqueue_jobs WHERE id = $1", job_id)

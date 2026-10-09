@@ -9,6 +9,7 @@ from typing import Any, Concatenate, Self, get_type_hints, overload
 
 from pydantic import BaseModel, ValidationError
 
+from pgqueue.backoff import DEFAULT_RETRY_POLICY, RetryPolicy
 from pgqueue.dsn import asyncpg_dsn
 from pgqueue.errors import PayloadError, PgQueueError, UnknownTaskError
 from pgqueue.models import Job, JobContext
@@ -24,6 +25,7 @@ class TaskOptions:
     priority: int = 0
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     timeout: float | None = None
+    retry: RetryPolicy = DEFAULT_RETRY_POLICY
 
 
 class Task[M: BaseModel | None]:
@@ -245,17 +247,25 @@ class PgQueue:
         priority: int = 0,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         timeout: float | None = None,
+        retry: RetryPolicy | None = None,
     ) -> _TaskDecorator:
         """Register a handler as a task.
 
         The handler may be sync or async. Its first parameter, if any, must be
         annotated with a pydantic model -- that is the payload type. A parameter
         annotated with :class:`JobContext` receives job metadata.
+
+        Failed attempts are retried after ``retry`` backoff until
+        ``max_attempts`` is reached, after which the job is ``dead``.
         """
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         options = TaskOptions(
-            queue=queue, priority=priority, max_attempts=max_attempts, timeout=timeout
+            queue=queue,
+            priority=priority,
+            max_attempts=max_attempts,
+            timeout=timeout,
+            retry=retry or DEFAULT_RETRY_POLICY,
         )
         return _TaskDecorator(self, name, options)
 
