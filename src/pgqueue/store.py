@@ -40,14 +40,16 @@ async def create_pool(dsn: str, *, min_size: int = 1, max_size: int = 10) -> Job
 
 _INSERT = """
 INSERT INTO pgqueue_jobs (queue, task, payload, priority, run_at, max_attempts, idempotency_key)
-VALUES ($1, $2, $3, $4, COALESCE($5, now()), $6, $7)
+VALUES ($1, $2, $3, $4,
+        COALESCE($5::timestamptz, now() + make_interval(secs => $8::float8)), $6, $7)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING id
 """
 
 _INSERT_MANY = """
 INSERT INTO pgqueue_jobs (queue, task, payload, priority, run_at, max_attempts, idempotency_key)
-SELECT $1, $2, t.payload, $3, COALESCE($4, now()), $5, t.key
+SELECT $1, $2, t.payload, $3,
+       COALESCE($4::timestamptz, now() + make_interval(secs => $8::float8)), $5, t.key
 FROM unnest($6::jsonb[], $7::text[]) AS t(payload, key)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING id
@@ -123,15 +125,26 @@ class JobStore:
         run_at: datetime | None,
         max_attempts: int,
         idempotency_key: str | None,
+        delay: float = 0.0,
     ) -> tuple[int, bool]:
         """Insert one job; return ``(id, created)``.
 
         With an idempotency key that already exists, nothing is inserted and
         the id of the existing job is returned with ``created=False``.
+        ``run_at`` (absolute) wins over ``delay`` (seconds from the database's
+        clock, which avoids trusting the producer's clock).
         """
         async with self.pool.acquire() as conn:
             job_id: int | None = await conn.fetchval(
-                _INSERT, queue, task, payload, priority, run_at, max_attempts, idempotency_key
+                _INSERT,
+                queue,
+                task,
+                payload,
+                priority,
+                run_at,
+                max_attempts,
+                idempotency_key,
+                delay,
             )
             if job_id is not None:
                 return job_id, True
@@ -147,6 +160,7 @@ class JobStore:
                     run_at=run_at,
                     max_attempts=max_attempts,
                     idempotency_key=idempotency_key,
+                    delay=delay,
                 )
             return existing, False
 
@@ -160,13 +174,22 @@ class JobStore:
         priority: int,
         run_at: datetime | None,
         max_attempts: int,
+        delay: float = 0.0,
     ) -> list[int]:
         """Insert many jobs in one statement; return the ids that were created."""
         keys = list(idempotency_keys) if idempotency_keys is not None else [None] * len(payloads)
         if len(keys) != len(payloads):
             raise ValueError("idempotency_keys must be as long as payloads")
         rows = await self.pool.fetch(
-            _INSERT_MANY, queue, task, priority, run_at, max_attempts, list(payloads), keys
+            _INSERT_MANY,
+            queue,
+            task,
+            priority,
+            run_at,
+            max_attempts,
+            list(payloads),
+            keys,
+            delay,
         )
         return [row["id"] for row in rows]
 

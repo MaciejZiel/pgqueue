@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Concatenate, Self, get_type_hints, overload
 
 from pydantic import BaseModel, ValidationError
@@ -17,6 +18,20 @@ from pgqueue.store import JobPool, JobStore, create_pool
 
 DEFAULT_QUEUE = "default"
 DEFAULT_MAX_ATTEMPTS = 5
+
+
+def resolve_schedule(
+    delay: float | timedelta | None, run_at: datetime | None
+) -> tuple[datetime | None, float]:
+    """Normalise the two ways of scheduling a job to ``(run_at, delay_seconds)``."""
+    if delay is not None and run_at is not None:
+        raise ValueError("pass either delay or run_at, not both")
+    if run_at is not None and run_at.tzinfo is None:
+        raise ValueError("run_at must be timezone-aware")
+    seconds = delay.total_seconds() if isinstance(delay, timedelta) else float(delay or 0)
+    if seconds < 0:
+        raise ValueError("delay must be non-negative")
+    return run_at, seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,18 +112,25 @@ class Task[M: BaseModel | None]:
         priority: int | None = None,
         max_attempts: int | None = None,
         idempotency_key: str | None = None,
+        delay: float | timedelta | None = None,
+        run_at: datetime | None = None,
     ) -> int:
         """Add one job for this task and return its id.
+
+        ``delay`` (seconds or a timedelta) or ``run_at`` (an aware datetime)
+        schedule the job for later; until then it is invisible to workers.
 
         If ``idempotency_key`` is given and a job with that key already exists,
         no new job is created and the existing job's id is returned.
         """
+        at, seconds = resolve_schedule(delay, run_at)
         job_id, _ = await self.app.store.insert(
             queue=queue or self.options.queue,
             task=self.name,
             payload=self.dump_payload(payload),
             priority=self.options.priority if priority is None else priority,
-            run_at=None,
+            run_at=at,
+            delay=seconds,
             max_attempts=max_attempts or self.options.max_attempts,
             idempotency_key=idempotency_key,
         )
@@ -122,15 +144,19 @@ class Task[M: BaseModel | None]:
         queue: str | None = None,
         priority: int | None = None,
         max_attempts: int | None = None,
+        delay: float | timedelta | None = None,
+        run_at: datetime | None = None,
     ) -> list[int]:
         """Add many jobs in a single INSERT; returns the ids actually created."""
+        at, seconds = resolve_schedule(delay, run_at)
         return await self.app.store.insert_many(
             queue=queue or self.options.queue,
             task=self.name,
             payloads=[self.dump_payload(p) for p in payloads],
             idempotency_keys=idempotency_keys,
             priority=self.options.priority if priority is None else priority,
-            run_at=None,
+            run_at=at,
+            delay=seconds,
             max_attempts=max_attempts or self.options.max_attempts,
         )
 
@@ -291,6 +317,8 @@ class PgQueue:
         priority: int | None = None,
         max_attempts: int | None = None,
         idempotency_key: str | None = None,
+        delay: float | timedelta | None = None,
+        run_at: datetime | None = None,
     ) -> int:
         """Enqueue by task name, e.g. from a process that does not import the handler.
 
@@ -304,13 +332,17 @@ class PgQueue:
                 priority=priority,
                 max_attempts=max_attempts,
                 idempotency_key=idempotency_key,
+                delay=delay,
+                run_at=run_at,
             )
+        at, seconds = resolve_schedule(delay, run_at)
         job_id, _ = await self.store.insert(
             queue=queue or DEFAULT_QUEUE,
             task=task,
             payload=payload or {},
             priority=priority or 0,
-            run_at=None,
+            run_at=at,
+            delay=seconds,
             max_attempts=max_attempts or DEFAULT_MAX_ATTEMPTS,
             idempotency_key=idempotency_key,
         )
