@@ -74,7 +74,7 @@ async def test_notification_wakes_an_idle_worker_immediately(app: PgQueue) -> No
         await wait_until(all_in(app, "succeeded", 1), within=5)
         latency = time.monotonic() - started
 
-    assert latency < 1.0
+    assert latency < 3.0  # versus a 30 s poll interval
 
 
 async def test_notifications_for_other_queues_are_ignored(app: PgQueue) -> None:

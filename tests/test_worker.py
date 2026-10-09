@@ -188,23 +188,31 @@ async def test_concurrency_limit_is_respected(app: PgQueue) -> None:
     elapsed = time.monotonic() - started
 
     assert peak == 5
-    assert elapsed < 2.0  # 20 jobs x 100 ms / 5 slots = ~0.4 s, not 2 s sequentially
+    assert elapsed < 1.8  # 20 jobs x 100 ms / 5 slots = ~0.4 s; sequentially 2 s
 
 
 async def test_sync_handlers_run_off_the_event_loop(app: PgQueue) -> None:
     threads: set[str] = set()
+    lock = threading.Lock()
+    active = 0
+    peak = 0
 
     @app.task()
     def blocking(payload: Item) -> None:
-        threads.add(threading.current_thread().name)
-        time.sleep(0.2)
+        nonlocal active, peak
+        with lock:
+            threads.add(threading.current_thread().name)
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.3)
+        with lock:
+            active -= 1
 
     await blocking.enqueue_many([Item(n=i) for i in range(4)])
-    started = time.monotonic()
     async with running(make_worker(app, concurrency=4)):
         await wait_until(all_in(app, "succeeded", 4))
 
-    assert time.monotonic() - started < 0.7
+    assert peak == 4  # four blocking calls overlapped
     assert all(name.startswith("pgqueue-sync") for name in threads)
 
 
@@ -258,3 +266,23 @@ def test_worker_validates_arguments() -> None:
         Worker(app, concurrency=0)
     with pytest.raises(ValueError, match="queue"):
         Worker(app, queues=[])
+
+
+async def test_forced_stop_does_not_wait_for_the_shutdown_timeout(app: PgQueue) -> None:
+    @app.task()
+    async def stuck(payload: Item) -> None:
+        await asyncio.sleep(60)
+
+    await stuck.enqueue(Item(n=1))
+    worker = make_worker(app, shutdown_timeout=60)
+    task = asyncio.create_task(worker.run())
+    await wait_until(all_in(app, "running", 1))
+
+    worker.stop()
+    await asyncio.sleep(0.2)
+    worker.shutdown_timeout = 0  # what a second SIGTERM does
+    started = time.monotonic()
+    await asyncio.wait_for(task, 5)
+
+    assert time.monotonic() - started < 5  # instead of the 60 s shutdown timeout
+    assert await count(app, "queued") == 1

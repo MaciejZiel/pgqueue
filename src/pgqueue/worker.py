@@ -142,6 +142,12 @@ class Worker:
         self._executor = ThreadPoolExecutor(
             max_workers=self.concurrency, thread_name_prefix="pgqueue-sync"
         )
+        await self.app.store.register_worker(
+            self.id,
+            queues=self.queues,
+            concurrency=self.concurrency,
+            lease_seconds=self.lease_seconds,
+        )
         log.info(
             "worker %s started: queues=%s concurrency=%d", self.id, self.queues, self.concurrency
         )
@@ -165,6 +171,8 @@ class Worker:
                 task.cancel()
             await asyncio.gather(*self._background, return_exceptions=True)
             self._executor.shutdown(wait=False, cancel_futures=True)
+            with contextlib.suppress(Exception):
+                await self.app.store.deregister_worker(self.id)
             log.info(
                 "worker %s stopped: processed=%d failed=%d", self.id, self.processed, self.failed
             )
@@ -207,12 +215,15 @@ class Worker:
         self._wakeup.set()  # a slot is free
 
     async def _drain(self) -> None:
-        if not self._running:
-            return
-        tasks = list(self._running)
-        _, pending = await asyncio.wait(tasks, timeout=self.shutdown_timeout or None)
-        if pending and self.shutdown_timeout:
-            log.warning("shutdown timeout: releasing %d unfinished job(s)", len(pending))
+        """Wait for in-flight jobs until they finish, the timeout passes or a forced stop."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.shutdown_timeout
+        pending = set(self._running)
+        while pending and self.shutdown_timeout > 0 and loop.time() < deadline:
+            # Short slices so a second signal (shutdown_timeout = 0) takes effect quickly.
+            _, pending = await asyncio.wait(pending, timeout=min(0.1, deadline - loop.time()))
+        if pending:
+            log.warning("releasing %d unfinished job(s)", len(pending))
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
@@ -230,6 +241,9 @@ class Worker:
                 log.exception("background %s failed; will retry", action.__name__)
 
     async def _heartbeat(self) -> None:
+        await self.app.store.touch_worker(
+            self.id, in_flight=self.in_flight, processed=self.processed, failed=self.failed
+        )
         jobs = {job.id: job for job in self._running.values()}
         if not jobs:
             return
@@ -244,6 +258,7 @@ class Worker:
     async def _reap(self) -> None:
         for job_id, status, owner in await self.app.store.reap_expired():
             log.warning("recovered job %d from %s -> %s", job_id, owner, status.value)
+        await self.app.store.prune_workers()
         self._wakeup.set()
 
     async def _fire_periodic(self) -> None:
