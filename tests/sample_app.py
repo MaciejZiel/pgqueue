@@ -7,7 +7,7 @@ import os
 
 from pydantic import BaseModel
 
-from pgqueue import PgQueue
+from pgqueue import JobContext, PgQueue
 
 app = PgQueue(
     os.environ.get("PGQUEUE_TEST_DSN", "postgresql://pgqueue:pgqueue@localhost:55432/pgqueue_test")
@@ -22,3 +22,14 @@ class Sleep(BaseModel):
 async def sleep(payload: Sleep) -> float:
     await asyncio.sleep(payload.seconds)
     return payload.seconds
+
+
+@app.task(name="stress.record")
+async def record(ctx: JobContext) -> None:
+    """Used by the multi-process stress test: log which process ran which job."""
+    await app.pool.execute(
+        "INSERT INTO stress_executions VALUES ($1, $2, $3, true)",
+        ctx.job_id,
+        ctx.attempt,
+        str(os.getpid()),
+    )
