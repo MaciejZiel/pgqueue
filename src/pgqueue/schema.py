@@ -111,3 +111,6 @@ jobs = Table(
     # Dashboard: recent failures and throughput.
     Index("ix_pgqueue_jobs_status_finished", "status", "finished_at"),
 )
+
+# Channel the triggers from migration 0002 notify; the payload is the queue name.
+NOTIFY_CHANNEL = "pgqueue_jobs"

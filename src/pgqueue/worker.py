@@ -33,8 +33,9 @@ from pydantic_core import to_jsonable_python
 from pgqueue.app import PgQueue, Task
 from pgqueue.backoff import DEFAULT_RETRY_POLICY
 from pgqueue.models import Job, JobContext
+from pgqueue.notify import Listener
 from pgqueue.outcomes import decide_failure, format_error
-from pgqueue.schema import JobStatus
+from pgqueue.schema import NOTIFY_CHANNEL, JobStatus
 
 log = logging.getLogger("pgqueue.worker")
 
@@ -58,6 +59,7 @@ class Worker:
         worker_id: str | None = None,
         heartbeat_interval: float | None = None,
         reap_interval: float | None = None,
+        listen: bool = True,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
@@ -76,6 +78,11 @@ class Worker:
         # lease expiring under a healthy worker.
         self.heartbeat_interval = heartbeat_interval or lease_seconds / 3
         self.reap_interval = reap_interval or lease_seconds / 2
+        self.listener: Listener | None = None
+        if listen:
+            self.listener = Listener(
+                app.dsn, NOTIFY_CHANNEL, self._on_notify, on_reconnect=self.wake
+            )
 
         self.processed = 0
         self.failed = 0
@@ -101,6 +108,10 @@ class Worker:
     def wake(self) -> None:
         """Skip the rest of the current poll interval and try to claim now."""
         self._wakeup.set()
+
+    def _on_notify(self, queue: str) -> None:
+        if queue in self.queues:
+            self._wakeup.set()
 
     def install_signal_handlers(self) -> None:
         """SIGTERM/SIGINT drain gracefully; a second signal stops without waiting."""
@@ -133,6 +144,8 @@ class Worker:
             asyncio.create_task(self._every(self.heartbeat_interval, self._heartbeat)),
             asyncio.create_task(self._every(self.reap_interval, self._reap)),
         ]
+        if self.listener is not None:
+            self._background.append(asyncio.create_task(self.listener.run()))
         try:
             await self._loop()
         finally:
