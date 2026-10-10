@@ -62,12 +62,14 @@ ignore = ["PLR0913", "PLR2004", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004", "S101"]
+# Benchmarks poll the database on purpose: that is what they measure.
+"bench/**" = ["ASYNC110"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["src", "tests"]
+files = ["src", "tests", "examples", "bench"]
 
 [[tool.mypy.overrides]]
 module = ["asyncpg", "asyncpg.*", "prometheus_client", "prometheus_client.*"]

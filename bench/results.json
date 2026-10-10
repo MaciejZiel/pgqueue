@@ -1,0 +1,77 @@
+{
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i5-13500H (16 logical CPUs)",
+    "memory": "14Gi RAM",
+    "disk": "NVMe SSD; Postgres 17 in Docker (default config) on the same machine",
+    "os": "Linux 7.0.0-38-generic",
+    "python": "3.12.13",
+    "postgres": "postgres (PostgreSQL) 17.11",
+    "load_before": "5.89 4.33 4.17"
+  },
+  "results": [
+    {
+      "scenario": "enqueue, one at a time (1 client)",
+      "jobs": 5000,
+      "seconds": 10.196898877999047,
+      "detail": "",
+      "rate": 490.34515883922916
+    },
+    {
+      "scenario": "enqueue, one at a time (10 concurrent clients)",
+      "jobs": 20000,
+      "seconds": 13.912013039000158,
+      "detail": "",
+      "rate": 1437.606473192134
+    },
+    {
+      "scenario": "enqueue_many, batches of 1000",
+      "jobs": 100000,
+      "seconds": 2.469376367997029,
+      "detail": "",
+      "rate": 40496.05450833419
+    },
+    {
+      "scenario": "process backlog: 1 worker process(es) x 32 concurrency",
+      "jobs": 50000,
+      "seconds": 34.82572885800255,
+      "detail": "",
+      "rate": 1435.7201310522057
+    },
+    {
+      "scenario": "process backlog: 2 worker process(es) x 32 concurrency",
+      "jobs": 50000,
+      "seconds": 19.02412557900243,
+      "detail": "",
+      "rate": 2628.2416919696266
+    },
+    {
+      "scenario": "process backlog: 4 worker process(es) x 32 concurrency",
+      "jobs": 50000,
+      "seconds": 11.947290708001674,
+      "detail": "",
+      "rate": 4185.049248572532
+    },
+    {
+      "scenario": "process backlog: 8 worker process(es) x 32 concurrency",
+      "jobs": 50000,
+      "seconds": 7.547685925001133,
+      "detail": "",
+      "rate": 6624.546979939748
+    },
+    {
+      "scenario": "latency at 100 jobs/s, LISTEN/NOTIFY + 1 s polling",
+      "jobs": 1000,
+      "seconds": 10,
+      "detail": "pickup latency p50 4.1 ms, p95 6.7 ms, p99 12.5 ms",
+      "rate": 100.0
+    },
+    {
+      "scenario": "latency at 100 jobs/s, polling only (1 s interval)",
+      "jobs": 1000,
+      "seconds": 10,
+      "detail": "pickup latency p50 482.8 ms, p95 931.8 ms, p99 991.0 ms",
+      "rate": 100.0
+    }
+  ],
+  "date": "2026-10-10"
+}
