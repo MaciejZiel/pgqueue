@@ -188,7 +188,7 @@
       const pct = Math.min(100, Math.round((w.in_flight / w.concurrency) * 100));
       return el("tr", {},
         el("td", { class: "mono", title: `${w.hostname} pid ${w.pid}` }, w.id),
-        el("td", {}, el("div", { class: "chips" }, w.queues.map((q) => el("span", { class: "chip" }, q)))),
+        el("td", { class: "queues-cell", title: w.queues.join(", ") }, w.queues.join(", ")),
         el("td", {},
           el("div", { class: "busy" },
             el("div", { class: "track" }, el("div", { class: "fill", style: `width:${pct}%` })),

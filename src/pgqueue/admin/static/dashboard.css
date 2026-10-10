@@ -180,8 +180,7 @@ tbody tr:last-child td { border-bottom: 0; }
   margin-right: 4px;
 }
 
-.chips { display: flex; flex-wrap: wrap; gap: 4px; max-width: 260px; }
-.chips .chip { margin: 0; }
+.queues-cell { font: 12.5px var(--mono); color: var(--muted); max-width: 220px; }
 
 .busy { display: flex; align-items: center; gap: 8px; min-width: 120px; }
 .busy .track { flex: 1; height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; }
