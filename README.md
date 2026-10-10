@@ -23,19 +23,23 @@ from pgqueue import PgQueue, PermanentError
 
 app = PgQueue("postgresql://localhost/shop")
 
+
 class Charge(BaseModel):
     invoice_id: int
     amount_cents: int
 
+
 @app.task(queue="billing", max_attempts=5, priority=10)
 async def charge(payload: Charge) -> dict[str, str]:
     if payload.amount_cents <= 0:
-        raise PermanentError("nothing to charge")      # -> failed, no retries
+        raise PermanentError("nothing to charge")  # -> failed, no retries
     return {"charge_id": await provider.charge(payload.invoice_id)}
 
-@app.periodic("0 3 * * *")                              # every day at 03:00 UTC
+
+@app.periodic("0 3 * * *")  # every day at 03:00 UTC
 @app.task()
 async def nightly_report() -> None: ...
+
 
 async with app:
     async with app.pool.acquire() as conn, conn.transaction():
@@ -128,15 +132,22 @@ from pgqueue import JobContext, PgQueue, Retry, RetryPolicy
 
 app = PgQueue(os.environ["PGQUEUE_DSN"])
 
+
 class Webhook(BaseModel):
     url: str
     event: str
 
-@app.task(queue="webhooks", max_attempts=8, timeout=30,
-          retry=RetryPolicy(base=2, factor=2, max_delay=3600))
+
+@app.task(
+    queue="webhooks",
+    max_attempts=8,
+    timeout=30,
+    retry=RetryPolicy(base=2, factor=2, max_delay=3600),
+)
 async def deliver(payload: Webhook, ctx: JobContext) -> int:
-    response = await http.post(payload.url, json={"event": payload.event},
-                               headers={"Idempotency-Key": f"job-{ctx.job_id}"})
+    response = await http.post(
+        payload.url, json={"event": payload.event}, headers={"Idempotency-Key": f"job-{ctx.job_id}"}
+    )
     if response.status == 429:
         raise Retry("rate limited", delay=float(response.headers["Retry-After"]))
     response.raise_for_status()
