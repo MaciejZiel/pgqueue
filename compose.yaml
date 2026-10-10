@@ -1,4 +1,18 @@
+# `docker compose up` starts the full demo: Postgres, migrations, the admin
+# dashboard on http://localhost:8080, two workers and a producer that keeps
+# enqueueing a realistic mix of jobs (some of which fail on purpose).
+#
+# For the test suite only Postgres is needed: `docker compose up -d postgres`.
 name: pgqueue
+
+x-app: &app
+  build: .
+  image: pgqueue-demo:latest
+  environment:
+    PGQUEUE_DSN: postgresql://pgqueue:pgqueue@postgres:5432/pgqueue
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
 
 services:
   postgres:
@@ -16,6 +30,42 @@ services:
       retries: 30
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+  migrate:
+    build: .
+    image: pgqueue-demo:latest
+    command: ["pgqueue", "migrate"]
+    environment:
+      PGQUEUE_DSN: postgresql://pgqueue:pgqueue@postgres:5432/pgqueue
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  admin:
+    <<: *app
+    command: ["pgqueue", "admin", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+
+  worker:
+    <<: *app
+    command:
+      - pgqueue
+      - worker
+      - examples.demo:app
+      - --queues=default,emails,images,billing,webhooks
+      - --concurrency=20
+      - --metrics-port=9100
+    deploy:
+      replicas: 2
+    stop_grace_period: 40s
+
+  producer:
+    <<: *app
+    command: ["python", "-m", "examples.producer"]
+    environment:
+      PGQUEUE_DSN: postgresql://pgqueue:pgqueue@postgres:5432/pgqueue
+      PRODUCER_RATE: "15"
 
 volumes:
   pgdata:
