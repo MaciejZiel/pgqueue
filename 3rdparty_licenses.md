@@ -2,7 +2,8 @@
 
 Every direct dependency of pgqueue (runtime, optional `admin` extra, development
 tooling, build backend, CI actions and container images). All of them use
-permissive licenses.
+permissive licenses. One transitive development-only dependency with a weak copyleft
+license is listed separately below.
 
 | source | name | license type | license link |
 |---|---|---|---|
@@ -26,6 +27,16 @@ permissive licenses.
 | https://hub.docker.com/_/postgres | postgres (container image) | PostgreSQL | https://www.postgresql.org/about/licence/ |
 | https://hub.docker.com/_/python | python (container image, demo only) | PSF-2.0 | https://docs.python.org/3/license.html |
 | https://github.com/astral-sh/uv | uv (container image, build stage of the demo) | MIT OR Apache-2.0 | https://github.com/astral-sh/uv/blob/main/LICENSE-MIT |
+
+## Development-only transitive dependencies
+
+These are installed only by `uv sync --all-extras` for local development and CI. They are
+not runtime dependencies, are not imported by pgqueue and are not distributed with it
+(neither in the package nor in the demo image).
+
+| source | name | license type | license link |
+|---|---|---|---|
+| https://pypi.org/project/pathspec/ | pathspec 1.1.1 (transitive, via mypy; dev/CI only, not distributed) | MPL-2.0 | https://github.com/cpburnz/python-pathspec/blob/master/LICENSE |
 
 ## Notes
 
