@@ -24,3 +24,13 @@ permissive licenses.
 | https://github.com/actions/setup-python | actions/setup-python | MIT | https://github.com/actions/setup-python/blob/main/LICENSE |
 | https://github.com/astral-sh/setup-uv | astral-sh/setup-uv | MIT | https://github.com/astral-sh/setup-uv/blob/main/LICENSE |
 | https://hub.docker.com/_/postgres | postgres (container image) | PostgreSQL | https://www.postgresql.org/about/licence/ |
+| https://hub.docker.com/_/python | python (container image, demo only) | PSF-2.0 | https://docs.python.org/3/license.html |
+| https://github.com/astral-sh/uv | uv (container image, build stage of the demo) | MIT OR Apache-2.0 | https://github.com/astral-sh/uv/blob/main/LICENSE-MIT |
+
+## Notes
+
+- The PostgreSQL driver is asyncpg; psycopg (LGPL-3.0) is deliberately not used.
+- Transitive dependencies were reviewed as well. Two are MPL-2.0 and stay out of
+  anything pgqueue ships: `certifi` (pulled in by httpx, which is therefore not used --
+  the admin tests use a small built-in ASGI client) and `pathspec`, a dependency of the
+  mypy type checker used only in development and CI, never distributed with pgqueue.
