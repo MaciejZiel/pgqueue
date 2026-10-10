@@ -9,8 +9,7 @@
 **A background job queue that runs on the PostgreSQL you already have.** No Redis, no
 RabbitMQ, no second system to operate, back up and keep consistent with your data.
 
-pgqueue is a small, production-style take on what Celery and RQ do, built around one
-PostgreSQL feature: `SELECT … FOR UPDATE SKIP LOCKED`. It gives you typed tasks, retries
+pgqueue is a small job queue library built around one PostgreSQL feature: `SELECT … FOR UPDATE SKIP LOCKED`. It gives you typed tasks, retries
 with backoff, a dead-letter state, scheduled and cron jobs, crash recovery through leases,
 LISTEN/NOTIFY wake-ups, a dashboard and Prometheus metrics, and it lets you enqueue a job
 **in the same transaction** as the data it refers to.
@@ -63,7 +62,7 @@ $ pgqueue admin --port 8080          # dashboard, JSON API and /metrics
 - [Guarantees and failure semantics](#guarantees-and-failure-semantics)
 - [Benchmarks](#benchmarks)
 - [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-- [Compared with Celery, RQ and pg-boss](#compared-with-celery-rq-and-pg-boss)
+- [When to use something else](#when-to-use-something-else)
 - [Limitations](#limitations)
 - [Development](#development)
 
@@ -77,10 +76,10 @@ that was rolled back. Keeping the queue in the same database turns that into one
 transaction.
 
 Postgres has had the primitive that makes this efficient since 9.5: `SKIP LOCKED` lets many
-workers grab different rows of the same table concurrently without blocking each other. Up
-to a few thousand jobs per second, which covers the vast majority of applications, a
-Postgres queue is simpler and safer than a broker. pgqueue is an exploration of what it
-takes to make one production-worthy.
+workers grab different rows of the same table concurrently without blocking each other. For
+workloads of up to a few thousand jobs per second, a Postgres queue is often the simpler
+option. pgqueue is an exploration of what it takes to make one robust: leases, fencing,
+retries and crash recovery, with tests for each failure mode.
 
 ## Features
 
@@ -386,26 +385,28 @@ make double firing impossible, so there is no election to get wrong.
 rather than httpx (which pulls in certifi, MPL-2.0) and why the stress tests use seeded
 randomness instead of Hypothesis (MPL-2.0).
 
-## Compared with Celery, RQ and pg-boss
+## When to use something else
 
-| | **pgqueue** | **Celery** | **RQ** | **pg-boss** (Node.js) |
-|---|---|---|---|---|
-| Infrastructure | PostgreSQL | RabbitMQ / Redis (+ result backend) | Redis | PostgreSQL |
-| Enqueue atomic with app data | yes (same transaction) | no (needs an outbox) | no | yes |
-| Delivery | at-least-once, leases + fencing | at-least-once with `acks_late`, otherwise at-most-once | at-most-once by default, jobs of a dead worker go to a failed registry | at-least-once, expiration-based |
-| Typed payloads | pydantic, checked by mypy | no (serialised args) | no | no (JSON) |
-| Retries / backoff / dead letter | built in | built in | retries built in, manual DLQ | built in |
-| Cron | built in, no leader | `celery beat` (a separate singleton process) | `rq-scheduler` (separate package) | built in |
-| Inspectability | SQL + dashboard | Flower, broker tools | rq-dashboard | SQL |
-| Throughput ceiling | thousands/s | tens of thousands/s and beyond | tens of thousands/s | thousands/s |
-| Maturity | a portfolio project | 15 years of production use | very mature | mature |
+pgqueue is a personal project, not a replacement for established tools. Celery, RQ,
+Dramatiq, Procrastinate and pg-boss are mature, widely used and solve problems pgqueue
+deliberately does not. A rough guide:
 
-Choose **Celery** when you need very high throughput, complex workflows (chains, chords),
-or already run RabbitMQ. Choose **RQ** for a minimal Redis-based queue with a big
-ecosystem. **pg-boss** is the closest relative in spirit (Postgres + `SKIP LOCKED`) for
-Node.js; mature Python options in the same space are Procrastinate and Dramatiq with a
-Postgres broker. pgqueue's niche is the combination of transactional enqueue, typed
-payloads, and failure semantics that are explicit and tested.
+- **pgqueue (or another Postgres-backed queue)** fits when you already run PostgreSQL,
+  your volume is in the hundreds to low thousands of jobs per second, and you want to
+  enqueue jobs in the same transaction as your application data.
+- **[Celery](https://docs.celeryq.dev/)** is a good choice when you need higher throughput
+  than a single database comfortably handles, workflow primitives (chains, groups, chords),
+  or already operate RabbitMQ or Redis. It has a large ecosystem and years of production use.
+- **[RQ](https://python-rq.org/)** is a simple, well-documented Redis-based queue; a good
+  fit when Redis is already part of your stack and you want minimal setup.
+- **[Procrastinate](https://procrastinate.readthedocs.io/)** and
+  **[Dramatiq](https://dramatiq.io/)** (with a Postgres broker) are mature Python options
+  built on the same idea as pgqueue; prefer them if you need a maintained library.
+- **[pg-boss](https://github.com/timgit/pg-boss)** is the long-standing equivalent for
+  Node.js.
+
+What pgqueue focuses on is a small, readable codebase in which transactional enqueue,
+typed payloads and the failure semantics above are explicit and covered by tests.
 
 ## Limitations
 
