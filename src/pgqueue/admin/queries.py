@@ -9,16 +9,22 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 
-from sqlalchemy import ColumnElement, and_, case, func, select, update
+from sqlalchemy import ColumnElement, and_, case, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from pgqueue.admin.schemas import (
+    FeedItem,
     JobOut,
     JobPage,
+    LatencyStats,
+    LiveStats,
     Overview,
     PeriodicOut,
     QueueStats,
+    RunningJob,
+    Snapshot,
     ThroughputPoint,
+    ThroughputSecond,
     WorkerOut,
 )
 from pgqueue.schema import READY_STATUSES, JobStatus, jobs, periodic, workers
@@ -30,25 +36,7 @@ FAILURE_STATUSES = (JobStatus.FAILED, JobStatus.DEAD)
 async def overview(conn: AsyncConnection, *, minutes: int = 60) -> Overview:
     now: datetime = (await conn.execute(select(func.now()))).scalar_one()
 
-    counts: dict[str, dict[JobStatus, int]] = {}
-    for queue, status, n in await conn.execute(
-        select(jobs.c.queue, jobs.c.status, func.count()).group_by(jobs.c.queue, jobs.c.status)
-    ):
-        counts.setdefault(queue, dict.fromkeys(JobStatus, 0))[JobStatus(status)] = n
-
-    lag: dict[str, float] = {}
-    for queue, oldest in await conn.execute(
-        select(jobs.c.queue, func.min(jobs.c.run_at))
-        .where(jobs.c.status.in_(READY_STATUSES), jobs.c.run_at <= func.now())
-        .group_by(jobs.c.queue)
-    ):
-        lag[queue] = max(0.0, (now - oldest).total_seconds())
-
-    queues = [
-        QueueStats(queue=q, counts=c, lag_seconds=lag.get(q, 0.0))
-        for q, c in sorted(counts.items())
-    ]
-    totals = {s: sum(q.counts[s] for q in queues) for s in JobStatus}
+    queues, totals = await _queue_stats(conn, now)
     return Overview(
         now=now,
         totals=totals,
@@ -57,6 +45,28 @@ async def overview(conn: AsyncConnection, *, minutes: int = 60) -> Overview:
         workers=await list_workers(conn),
         periodic=await list_periodic(conn),
     )
+
+
+async def _queue_stats(
+    conn: AsyncConnection, now: datetime
+) -> tuple[list[QueueStats], dict[JobStatus, int]]:
+    counts: dict[str, dict[JobStatus, int]] = {}
+    for queue, status, n in await conn.execute(
+        select(jobs.c.queue, jobs.c.status, func.count()).group_by(jobs.c.queue, jobs.c.status)
+    ):
+        counts.setdefault(queue, dict.fromkeys(JobStatus, 0))[JobStatus(status)] = n
+    lag: dict[str, float] = {}
+    for queue, oldest in await conn.execute(
+        select(jobs.c.queue, func.min(jobs.c.run_at))
+        .where(jobs.c.status.in_(READY_STATUSES), jobs.c.run_at <= func.now())
+        .group_by(jobs.c.queue)
+    ):
+        lag[queue] = max(0.0, (now - oldest).total_seconds())
+    queues = [
+        QueueStats(queue=q, counts=c, lag_seconds=lag.get(q, 0.0))
+        for q, c in sorted(counts.items())
+    ]
+    return queues, {s: sum(q.counts[s] for q in queues) for s in JobStatus}
 
 
 async def throughput(
@@ -167,3 +177,152 @@ async def requeue_all(conn: AsyncConnection, *, queue: str, status: JobStatus) -
         .values(**_requeue_values())
     )
     return result.rowcount
+
+
+# -- live view -----------------------------------------------------------------------------
+
+_LATENCY = text(
+    """
+    SELECT
+      count(*) AS samples,
+      percentile_cont(ARRAY[0.5, 0.95]) WITHIN GROUP (
+        ORDER BY greatest(0, extract(epoch FROM started_at - run_at))) AS pickup,
+      percentile_cont(ARRAY[0.5, 0.95]) WITHIN GROUP (
+        ORDER BY extract(epoch FROM finished_at - started_at))
+        FILTER (WHERE status = 'succeeded') AS run,
+      count(*) FILTER (WHERE status = 'succeeded') AS run_samples,
+      coalesce(sum(greatest(attempts - 1, 0)), 0) AS retries,
+      count(*) FILTER (WHERE status IN ('failed', 'dead')) AS failures
+    FROM pgqueue_jobs
+    WHERE status IN ('succeeded', 'failed', 'dead')
+      AND finished_at >= now() - make_interval(secs => :window)
+      AND started_at IS NOT NULL
+    """
+)
+
+
+async def live_stats(conn: AsyncConnection, *, now: datetime, window: int = 120) -> LiveStats:
+    """Per-second throughput and latency percentiles over the last ``window`` seconds.
+
+    Everything is derived from the finished jobs' own timestamps, so it needs no
+    extra bookkeeping and is right no matter how many workers exist. The
+    percentiles cover the most recent minute; the throughput series the window.
+    """
+    second = func.date_trunc("second", jobs.c.finished_at).label("second")
+    rows = await conn.execute(
+        select(
+            second,
+            func.count().filter(jobs.c.status == JobStatus.SUCCEEDED),
+            func.count().filter(jobs.c.status.in_(FAILURE_STATUSES)),
+        )
+        .where(
+            jobs.c.status.in_((JobStatus.SUCCEEDED, *FAILURE_STATUSES)),
+            jobs.c.finished_at >= func.now() - timedelta(seconds=window),
+        )
+        .group_by(second)
+    )
+    buckets = {row[0]: (row[1], row[2]) for row in rows}
+    current = now.replace(microsecond=0)
+    series = []
+    for i in range(window - 1, -1, -1):
+        at = current - timedelta(seconds=i)
+        succeeded, failed = buckets.get(at, (0, 0))
+        series.append(ThroughputSecond(second=at, succeeded=succeeded, failed=failed))
+    # The current second is still filling up: average the ten complete ones before it.
+    recent = series[-11:-1]
+    per_second = sum(p.succeeded + p.failed for p in recent) / max(1, len(recent))
+
+    row = (await conn.execute(_LATENCY, {"window": 60})).one()
+    pickup = row.pickup or [None, None]
+    run = row.run or [None, None]
+    return LiveStats(
+        window_seconds=window,
+        jobs_per_second=per_second,
+        throughput=series,
+        pickup=LatencyStats(p50=pickup[0], p95=pickup[1], samples=row.samples),
+        run=LatencyStats(p50=run[0], p95=run[1], samples=row.run_samples),
+        retries=int(row.retries),
+        failures=row.failures,
+    )
+
+
+async def running_jobs(conn: AsyncConnection, *, limit: int = 40) -> list[RunningJob]:
+    """Jobs currently holding a lease, soonest-to-expire first."""
+    rows = await conn.execute(
+        select(
+            jobs.c.id,
+            jobs.c.task,
+            jobs.c.queue,
+            jobs.c.attempts,
+            jobs.c.max_attempts,
+            jobs.c.locked_by,
+            jobs.c.started_at,
+            jobs.c.heartbeat_at,
+            jobs.c.locked_until,
+        )
+        .where(jobs.c.status == JobStatus.RUNNING)
+        .order_by(jobs.c.started_at.desc())
+        .limit(limit)
+    )
+    return [RunningJob.model_validate(row._mapping) for row in rows]
+
+
+async def recent_activity(
+    conn: AsyncConnection, *, limit: int = 25, lookback_ids: int = 400
+) -> list[FeedItem]:
+    """The most recently changed jobs among the newest ``lookback_ids`` ones.
+
+    Restricting to a window of recent ids keeps this a primary-key range scan
+    however large the table is.
+    """
+    at = func.coalesce(jobs.c.finished_at, jobs.c.started_at, jobs.c.created_at)
+    newest = select(func.max(jobs.c.id)).scalar_subquery()
+    rows = await conn.execute(
+        select(
+            jobs.c.id,
+            jobs.c.task,
+            jobs.c.queue,
+            jobs.c.status,
+            jobs.c.attempts,
+            jobs.c.max_attempts,
+            at.label("at"),
+            func.extract("epoch", jobs.c.finished_at - jobs.c.started_at).label("duration"),
+            jobs.c.last_error,
+        )
+        .where(jobs.c.id > newest - lookback_ids)
+        .order_by(at.desc(), jobs.c.id.desc())
+        .limit(limit)
+    )
+    items = []
+    for row in rows:
+        error = row.last_error.strip().splitlines()[-1] if row.last_error else None
+        items.append(
+            FeedItem(
+                id=row.id,
+                task=row.task,
+                queue=row.queue,
+                status=row.status,
+                attempts=row.attempts,
+                max_attempts=row.max_attempts,
+                at=row.at,
+                duration=float(row.duration) if row.duration is not None else None,
+                error=error,
+            )
+        )
+    return items
+
+
+async def snapshot(conn: AsyncConnection, *, read_only: bool) -> Snapshot:
+    now: datetime = (await conn.execute(select(func.now()))).scalar_one()
+    queues, totals = await _queue_stats(conn, now)
+    return Snapshot(
+        now=now,
+        read_only=read_only,
+        totals=totals,
+        queues=queues,
+        workers=await list_workers(conn),
+        running=await running_jobs(conn),
+        periodic=await list_periodic(conn),
+        stats=await live_stats(conn, now=now),
+        feed=await recent_activity(conn),
+    )
