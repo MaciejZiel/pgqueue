@@ -9,7 +9,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from pgqueue import JobStatus, PgQueue
-from pgqueue.admin import create_app
+from pgqueue.admin import create_app, live, queries
 from pgqueue.admin.live import LiveFeed
 
 from .asgi import Client
@@ -186,3 +186,69 @@ async def test_stream_endpoint_refuses_when_full(app: PgQueue, admin: FastAPI) -
     response = await Client(admin).get("/api/stream")
 
     assert response.status == 503
+
+
+async def test_finished_counts_follow_new_jobs_between_full_counts(
+    app: PgQueue, admin: FastAPI
+) -> None:
+    engine = admin.state.engine
+    await app.pool.execute(
+        "INSERT INTO pgqueue_jobs (queue, task, status, finished_at) "
+        "SELECT 'q', 't', 'succeeded', now() - interval '1 hour' FROM generate_series(1, 5)"
+    )
+    finished = queries.FinishedCounts(max_age=3600)
+
+    async def totals() -> dict[JobStatus, int]:
+        async with engine.connect() as conn:
+            return (await queries.snapshot(conn, read_only=True, finished=finished)).totals
+
+    assert (await totals())[JobStatus.SUCCEEDED] == 5
+    # Finished after the full count: found through the index, without a recount.
+    await app.pool.execute(
+        "INSERT INTO pgqueue_jobs (queue, task, status, finished_at) "
+        "VALUES ('q', 't', 'succeeded', now()), ('q', 't', 'dead', now()), "
+        "('q', 't', 'queued', NULL)"
+    )
+    counts = await totals()
+    assert (counts[JobStatus.SUCCEEDED], counts[JobStatus.DEAD], counts[JobStatus.QUEUED]) == (
+        6,
+        1,
+        1,
+    )
+    async with engine.connect() as conn:
+        exact = (await queries.overview(conn)).totals
+    assert counts == exact
+
+    # Deletions show up at the next full count.
+    await app.pool.execute(
+        "DELETE FROM pgqueue_jobs WHERE finished_at < now() - interval '1 minute'"
+    )
+    assert (await totals())[JobStatus.SUCCEEDED] == 6
+    finished.max_age = 0
+    assert (await totals())[JobStatus.SUCCEEDED] == 1
+
+
+async def test_a_stalled_viewer_does_not_block_the_others(
+    app: PgQueue, admin: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(live, "KEEPALIVE_SECONDS", 0.05)
+    feed: LiveFeed = admin.state.feed
+    gate = asyncio.Event()
+
+    async def slow() -> bytes:
+        await gate.wait()
+        return b"{}"
+
+    feed._compute = slow  # type: ignore[method-assign]
+    stalled = feed.subscribe()
+    # Nothing is computed yet, so the first item is a keep-alive. The viewer then stops
+    # reading, as a slow client would, leaving its generator suspended.
+    assert await asyncio.wait_for(anext(stalled), 1) is None
+    gate.set()
+    other = feed.subscribe()
+    try:
+        assert await asyncio.wait_for(anext(other), 2) == b"{}"
+    finally:
+        await other.aclose()
+        await stalled.aclose()
+
