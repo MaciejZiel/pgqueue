@@ -515,7 +515,7 @@ typed payloads and the failure semantics above are explicit and covered by tests
 ```console
 $ docker compose up -d postgres         # Postgres 17 on localhost:55432
 $ uv sync --all-extras
-$ uv run pytest                          # 160+ tests against the real database, ~45 s
+$ uv run pytest                          # 173 tests against the real database, ~80 s
 $ uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
