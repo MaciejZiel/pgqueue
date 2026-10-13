@@ -27,7 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-hosting scripts in `deploy/termux/`.
 - CI runs the test suite on PostgreSQL 16, 17 and 18.
 
+### Security
+
+- The read-only dashboard shows only the last line of job errors with absolute paths removed, and
+  workers under a stable short label instead of host name and pid (API, live snapshot, metrics).
+  `WorkerOut.hostname` and `pid` are `None` there.
+- `read_only_dsn` / `PGQUEUE_READONLY_DSN`: the public dashboard can use a SELECT-only database role.
+  `deploy/termux/setup-db.sh` creates it, limits connections and revokes `CONNECT` from `PUBLIC`.
+
 ### Fixed
+
+- Job ids outside the bigint range (`/api/jobs/{id}`, `before_id`) now answer 422 instead of 500.
+- The Termux boot script rotates its log (`logcap.sh`) instead of appending forever.
 
 - Workers no longer log "lost the lease" for a job that finished while its heartbeat was
   in flight.
