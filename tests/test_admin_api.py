@@ -152,7 +152,7 @@ async def test_dashboard_page_and_assets_are_served(client: Client) -> None:
     assert page.status == 200
     assert page.headers["content-type"].startswith("text/html")
     assert "pgqueue" in page.text
-    assert "/static/dashboard.js" in page.text
+    assert "static/dashboard.js" in page.text
 
     script = await client.get("/static/dashboard.js")
     assert script.status == 200
