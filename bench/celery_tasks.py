@@ -21,6 +21,11 @@ app = Celery("bench", broker=BROKER)
 app.conf.update(
     task_ignore_result=True,
     task_default_queue="bench",
+    # Both are Celery's defaults, spelled out because they matter for the comparison:
+    # early ack means a message is acknowledged when the worker receives it (at-most-once
+    # on a crash), and each 32-thread process prefetches 4 x 32 messages.
+    task_acks_late=False,
+    worker_prefetch_multiplier=4,
     broker_connection_retry_on_startup=True,
 )
 
