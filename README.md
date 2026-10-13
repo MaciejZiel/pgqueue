@@ -1,20 +1,24 @@
 # pgqueue
 
+**A background job queue that runs on the PostgreSQL you already have.** No Redis, no
+RabbitMQ, no second system to operate, back up and keep consistent with your data.
+
+**[Live demo](https://pgqueue.maciejzielinski.dev)** · [Status](https://status.maciejzielinski.dev) · [Portfolio](https://maciejzielinski.dev)
+
+The live demo is a read-only dashboard over a synthetic workload on a real PostgreSQL. Watch jobs retry, die and get recovered after a worker is killed.
+
 [![CI](https://github.com/MaciejZiel/pgqueue/actions/workflows/ci.yml/badge.svg)](https://github.com/MaciejZiel/pgqueue/actions/workflows/ci.yml)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776ab)
 ![PostgreSQL 16 | 17 | 18](https://img.shields.io/badge/postgres-16%20%7C%2017%20%7C%2018-336791)
 ![mypy strict](https://img.shields.io/badge/mypy-strict-2a6db2)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**A background job queue that runs on the PostgreSQL you already have.** No Redis, no
-RabbitMQ, no second system to operate, back up and keep consistent with your data.
-
 pgqueue is a small job queue library built around one PostgreSQL feature: `SELECT … FOR UPDATE SKIP LOCKED`. It gives you typed tasks, retries
 with backoff, a dead-letter state, scheduled and cron jobs, crash recovery through leases,
 LISTEN/NOTIFY wake-ups, a dashboard and Prometheus metrics, and it lets you enqueue a job
 **in the same transaction** as the data it refers to.
 
-![The live dashboard, recorded against the demo workload](docs/dashboard-live.gif)
+[![The pgqueue dashboard at desktop width, showing throughput, latency and queue depth for the demo workload](docs/dashboard.png)](https://pgqueue.maciejzielinski.dev)
 
 ```python
 from pydantic import BaseModel
@@ -178,11 +182,18 @@ $ pgqueue prune --older-than-days 14      # e.g. from a nightly cron
 
 ## The live demo
 
-`python -m demo` (or the Termux setup below) starts a self-contained showcase: the
-dashboard in **read-only mode** plus a synthetic workload that keeps it alive. Everything in
-the screenshots below is real: real workers, real jobs, real PostgreSQL.
+The public instance is at <https://pgqueue.maciejzielinski.dev> (uptime on the
+[status page](https://status.maciejzielinski.dev)).
 
-![Full dashboard](docs/dashboard.png)
+**Self-hosted:** it runs on a home server, as plain processes next to a PostgreSQL (see
+[Self-hosting on Termux](#self-hosting-on-termux)), not on a cloud platform.
+
+`python -m demo` (or the Termux setup below) starts the same self-contained showcase locally: the
+dashboard in **read-only mode** plus a synthetic workload that keeps it alive. Everything in
+the screenshots below, captured from the live demo, is real: real workers, real jobs, real
+PostgreSQL.
+
+![Full dashboard at desktop width](docs/dashboard.png)
 
 What is on the page:
 
