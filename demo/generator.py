@@ -7,6 +7,7 @@ import logging
 import math
 import random
 import time
+import uuid
 from collections.abc import Callable, Sequence
 
 from demo import tasks
@@ -40,6 +41,9 @@ class Generator:
         self.rng = rng or random.Random()
         self.clock = clock
         self.sequence = 0
+        # The sequence restarts with the process; the run id keeps the idempotency keys of a
+        # restarted demo from colliding with the finished jobs of the previous run.
+        self.run_id = uuid.uuid4().hex[:8]
         self.enqueued = 0
         self.bursts = 0
         self.paused = False
@@ -58,7 +62,7 @@ class Generator:
         if kind == "email":
             return await tasks.send_welcome.enqueue(
                 tasks.WelcomeEmail(user_id=n, email=f"user{n}@example.com"),
-                idempotency_key=f"welcome:{n}",
+                idempotency_key=f"welcome:{self.run_id}:{n}",
             )
         if kind == "image":
             width = self.rng.choice([320, 640, 1280, 2048])
@@ -89,7 +93,7 @@ class Generator:
                     tasks.WelcomeEmail(user_id=start + i, email=f"user{start + i}@example.com")
                     for i in range(size)
                 ],
-                idempotency_keys=[f"welcome:{start + i}" for i in range(size)],
+                idempotency_keys=[f"welcome:{self.run_id}:{start + i}" for i in range(size)],
             )
         elif kind == "image":
             ids = await tasks.resize_image.enqueue_many(

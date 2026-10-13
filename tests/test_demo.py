@@ -140,6 +140,19 @@ async def test_generator_enqueues_every_kind_into_its_queue(
     ]
 
 
+async def test_a_restarted_generator_still_enqueues_emails(
+    demo_app: PgQueue, settings: Settings
+) -> None:
+    for _ in range(2):  # the second one is the demo after a restart: same sequence numbers
+        await Generator(settings, rng=random.Random(1)).enqueue_one("email")
+        await Generator(settings, rng=random.Random(1)).burst()
+
+    emails = await demo_app.pool.fetchval(
+        "SELECT count(*) FROM pgqueue_jobs WHERE task = 'emails.send_welcome'"
+    )
+    assert emails == 2 + 2 * settings.burst_size
+
+
 async def test_generator_bursts_insert_many_jobs(demo_app: PgQueue, settings: Settings) -> None:
     generator = Generator(settings, rng=random.Random(3))
 
