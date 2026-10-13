@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -174,3 +175,21 @@ async def test_icons_are_served_with_image_types(client: Client) -> None:
         assert icon.headers["content-type"].split(";")[0] == ctype
         assert icon.body
     assert (await client.get("/favicon.ico")).headers["cache-control"] == "public, max-age=86400"
+
+
+@pytest.mark.parametrize("value", ["99999999999999999999", "0", "-1", str(2**63)])
+async def test_ids_outside_the_bigint_range_are_rejected_not_a_server_error(
+    client: Client, value: str
+) -> None:
+    assert (await client.get("/api/jobs", {"before_id": value})).status == 422
+    assert (await client.get(f"/api/jobs/{value}")).status == 422
+    assert (
+        await client.request("POST", f"/api/jobs/{value}/requeue", headers=ACTION)
+    ).status == 422
+
+
+async def test_the_largest_valid_id_is_simply_not_found(client: Client) -> None:
+    assert (await client.get(f"/api/jobs/{2**63 - 1}")).status == 404
+    page = await client.get("/api/jobs", {"before_id": 2**63 - 1})
+    assert page.status == 200
+    assert page.json()["jobs"] == []
