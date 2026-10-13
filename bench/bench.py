@@ -1,6 +1,6 @@
 """Reproducible benchmark: pgqueue on PostgreSQL, optionally next to Celery on Redis.
 
-    make bench                      # full run: ~30 min, writes bench/results.json
+    make bench                      # full run: about an hour, writes bench/results.json
     make bench-quick                # smoke test with tiny numbers, results are meaningless
     uv run --group bench python -m bench.bench --runs 3 --skip-celery
 
@@ -16,8 +16,12 @@ What is measured (all on one machine, workers are separate OS processes):
 * payload size: the drain scenario at 4 workers with 256 B, 2 KiB and 16 KiB payloads.
 
 The handler is a no-op, so the numbers describe the queue, not your work. Every
-scenario is repeated ``--runs`` times, interleaving the systems, and the raw
-per-run numbers are kept in the results file.
+scenario is repeated ``--runs`` times. The two systems run back to back with a cool-down
+(``--cooldown``, default 30 s) in between, and the order alternates with the run number
+(odd runs: pgqueue first, even runs: Celery first), so a systematic order effect cancels
+out over an even number of runs. Each record stores its position, the 1-minute load average
+before and after the measurement, and the raw per-run numbers are kept in the results file
+(``schema_version`` 2; version 1 files have no such field and a fixed pgqueue-first order).
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -70,6 +75,10 @@ def steady_rate(finished: list[float]) -> float:
     finished = sorted(finished)
     lo, hi = int(len(finished) * WINDOW[0]), int(len(finished) * WINDOW[1])
     return (hi - lo) / (finished[hi] - finished[lo])
+
+
+def loadavg() -> str:
+    return sh("cut -d' ' -f1 /proc/loadavg")
 
 
 def log(msg: str) -> None:
@@ -355,52 +364,99 @@ async def main(args: argparse.Namespace) -> None:
     sweep = [int(w) for w in args.workers.split(",")]
     size = SIZES[args.payload]
     celery = None if args.skip_celery else CeleryBench()
+    cooldown = 0.0 if quick else args.cooldown
 
     await prepare_database()
     await app.connect()
     env = await environment(celery is not None)
     records: list[Record] = []
 
-    def add(system: str, scenario: str, run: int, result: Record, **kw: Any) -> None:
+    async def measure(
+        system: str, scenario: str, run: int, position: str, call: Any, **kw: Any
+    ) -> None:
+        load_before = loadavg()
+        result = call()
+        if asyncio.iscoroutine(result):
+            result = await result
         rec = {
             "system": system,
             "scenario": scenario,
             "run": run,
+            "position": position,
             **kw,
             **result,
-            "load_1min": sh("cut -d' ' -f1 /proc/loadavg"),
+            "load_1min_before": load_before,
+            "load_1min": loadavg(),  # after the measurement; kept for the v1 readers
         }
         records.append(rec)
         short = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in result.items()}
-        log(f"{system:8} {scenario:8} run {run} {kw} {short}")
+        log(f"{system:8} {scenario:10} run {run} {kw} {short}")
+
+    async def both(run: int, scenario: str, pg_call: Any, celery_call: Any, **kw: Any) -> None:
+        """Run the systems back to back; odd runs start with pgqueue, even runs with Celery."""
+        calls = [("pgqueue", pg_call)]
+        if celery:
+            calls.append(("celery", celery_call))
+        if run % 2 == 0:
+            calls.reverse()
+        for i, (system, call) in enumerate(calls):
+            if i and cooldown:
+                await asyncio.sleep(cooldown)  # let checkpointer and autovacuum settle
+            await measure(system, scenario, run, "first" if i == 0 else "second", call, **kw)
 
     try:
         for run in range(1, runs + 1):
-            load = sh("cut -d' ' -f1 /proc/loadavg")
-            log(f"run {run}/{runs} (load average 1 min: {load})")
+            log(f"run {run}/{runs} (load average 1 min: {loadavg()})")
             for name, clients, bulk in [("single", 1, 0), ("ten", 10, 0), ("bulk", 1, 1000)]:
                 n = jobs // 4 if name != "bulk" else jobs * 2
                 kw = {"payload": size, "variant": name}
-                add("pgqueue", "enqueue", run, await pg_enqueue(n, size, clients, bulk), **kw)
-                if celery and name != "bulk":
-                    add("celery", "enqueue", run, celery.enqueue(n, size, clients), **kw)
-            for w in sweep:
-                add("pgqueue", "drain", run, await pg_drain(jobs, size, w), workers=w, payload=size)
-                if celery:
-                    add(
-                        "celery", "drain", run, celery.drain(jobs, size, w), workers=w, payload=size
+                if name == "bulk":  # Celery has no bulk publish
+                    await measure(
+                        "pgqueue",
+                        "enqueue",
+                        run,
+                        "only",
+                        partial(pg_enqueue, n, size, clients, bulk),
+                        **kw,
                     )
+                    continue
+                await both(
+                    run,
+                    "enqueue",
+                    partial(pg_enqueue, n, size, clients, bulk),
+                    celery and partial(celery.enqueue, n, size, clients),
+                    **kw,
+                )
             for w in sweep:
-                kw = {"workers": w, "payload": size, "arrival_rate": rate}
-                add("pgqueue", "pickup", run, await pg_pickup(rate, secs, size, w), **kw)
-                if celery:
-                    add("celery", "pickup", run, celery.pickup(rate, secs, size, w), **kw)
+                await both(
+                    run,
+                    "drain",
+                    partial(pg_drain, jobs, size, w),
+                    celery and partial(celery.drain, jobs, size, w),
+                    workers=w,
+                    payload=size,
+                )
+            for w in sweep:
+                await both(
+                    run,
+                    "pickup",
+                    partial(pg_pickup, rate, secs, size, w),
+                    celery and partial(celery.pickup, rate, secs, size, w),
+                    workers=w,
+                    payload=size,
+                    arrival_rate=rate,
+                )
             for label, psize in SIZES.items():
                 n = jobs // 2
-                kw = {"workers": 4, "payload": psize, "label": label}
-                add("pgqueue", "drain-size", run, await pg_drain(n, psize, 4), **kw)
-                if celery:
-                    add("celery", "drain-size", run, celery.drain(n, psize, 4), **kw)
+                await both(
+                    run,
+                    "drain-size",
+                    partial(pg_drain, n, psize, 4),
+                    celery and partial(celery.drain, n, psize, 4),
+                    workers=4,
+                    payload=psize,
+                    label=label,
+                )
     finally:
         env["load_average_at_end"] = sh("cut -d' ' -f1-3 /proc/loadavg")
         await app.close()
@@ -408,6 +464,7 @@ async def main(args: argparse.Namespace) -> None:
         out.write_text(
             json.dumps(
                 {
+                    "schema_version": 2,  # 1 (no field): fixed order, one load value per record
                     "environment": env,
                     "parameters": {
                         "runs": runs,
@@ -418,6 +475,8 @@ async def main(args: argparse.Namespace) -> None:
                         "workers": sweep,
                         "payload_bytes": size,
                         "quick": quick,
+                        "counterbalanced": True,
+                        "cooldown_s": cooldown,
                     },
                     "records": records,
                 },
@@ -436,6 +495,12 @@ if __name__ == "__main__":
     parser.add_argument("--seconds", type=int, default=15, help="length of a pickup run")
     parser.add_argument("--workers", default="1,2,4,8")
     parser.add_argument("--payload", choices=list(SIZES), default="medium")
+    parser.add_argument(
+        "--cooldown",
+        type=float,
+        default=30.0,
+        help="seconds to wait between the two systems of a pair (0 with --quick)",
+    )
     parser.add_argument("--skip-celery", action="store_true")
     parser.add_argument("--out", default=str(ROOT / "bench" / "results.json"))
     asyncio.run(main(parser.parse_args()))
