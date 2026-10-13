@@ -71,20 +71,20 @@ $ pgqueue admin --port 8080          # dashboard, JSON API and /metrics
 
 ## Contents
 
-- [Why a queue in Postgres?](#-why-a-queue-in-postgres)
-- [Features](#-features)
-- [Quick start](#-quick-start)
-- [The live demo](#-the-live-demo)
-- [Self-hosting on Termux](#-self-hosting-on-termux)
-- [Architecture](#-architecture)
-- [Guarantees and failure semantics](#-guarantees-and-failure-semantics)
-- [Benchmarks](#-benchmarks)
-- [Design decisions and trade-offs](#-design-decisions-and-trade-offs)
-- [When to use something else](#-when-to-use-something-else)
-- [Limitations](#-limitations)
-- [Development](#-development)
+- [Why a queue in Postgres?](#why-a-queue-in-postgres)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [The live demo](#the-live-demo)
+- [Self-hosting on Termux](#self-hosting-on-termux)
+- [Architecture](#architecture)
+- [Guarantees and failure semantics](#guarantees-and-failure-semantics)
+- [Benchmarks](#benchmarks)
+- [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+- [When to use something else](#when-to-use-something-else)
+- [Limitations](#limitations)
+- [Development](#development)
 
-## 💡 Why a queue in Postgres?
+## Why a queue in Postgres?
 
 Most applications that need background jobs already have a PostgreSQL database. Adding a
 broker means another service to run, monitor and secure, and, more subtly, a **dual-write
@@ -99,7 +99,7 @@ workloads of up to a few thousand jobs per second, a Postgres queue is often the
 option. pgqueue is an exploration of what it takes to make one robust: leases, fencing,
 retries and crash recovery, with tests for each failure mode.
 
-## ✨ Features
+## Features
 
 | | |
 |---|---|
@@ -117,7 +117,7 @@ retries and crash recovery, with tests for each failure mode.
 | **Operations** | Admin API + dashboard, Prometheus metrics (database-level on the admin, handler durations on workers), worker registry, `pgqueue prune` retention. |
 | **Migrations** | Alembic migrations ship in the package (own version table, safe next to your schema); `pgqueue migrate`. |
 
-## 🚀 Quick start
+## Quick start
 
 ### The demo
 
@@ -192,13 +192,13 @@ $ PGQUEUE_ADMIN_USERNAME=ops PGQUEUE_ADMIN_PASSWORD=… pgqueue admin --host 0.0
 $ pgqueue prune --older-than-days 14      # e.g. from a nightly cron
 ```
 
-## 🌐 The live demo
+## The live demo
 
 The public instance is at <https://pgqueue.maciejzielinski.dev> (uptime on the
 [status page](https://status.maciejzielinski.dev)).
 
 **Self-hosted:** it runs on a home server, as plain processes next to a PostgreSQL (see
-[Self-hosting on Termux](#-self-hosting-on-termux)), not on a cloud platform.
+[Self-hosting on Termux](#self-hosting-on-termux)), not on a cloud platform.
 
 `python -m demo` (or the Termux setup below) starts the same self-contained showcase locally: the
 dashboard in **read-only mode** plus a synthetic workload that keeps it alive. Everything in
@@ -248,7 +248,7 @@ $ export PGQUEUE_DSN=postgresql://user:pass@127.0.0.1/pgqueue_demo
 $ python -m demo            # migrates, then serves http://127.0.0.1:8080
 ```
 
-## 🏠 Self-hosting on Termux
+## Self-hosting on Termux
 
 The demo runs as plain processes (no Docker) on a self-hosted server: here Termux on
 aarch64, with PostgreSQL 18 and nginx. The scripts live in [`deploy/termux/`](deploy/termux). Roughly 270 MB of RAM for
@@ -276,7 +276,7 @@ $ deploy/termux/start.sh                                     # try it by hand fi
 - **Database**: the demo uses its own role and database and works with PostgreSQL 16 to 18
   (CI runs the test suite on all three).
 
-## 🧭 Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -352,7 +352,7 @@ The code is small enough to read in an afternoon:
 | [`outcomes.py`](src/pgqueue/outcomes.py), [`backoff.py`](src/pgqueue/backoff.py) | What a failure turns into |
 | [`admin/`](src/pgqueue/admin) | FastAPI admin, dashboard, `/metrics` |
 
-## 🛡 Guarantees and failure semantics
+## Guarantees and failure semantics
 
 **Delivery is at-least-once.** A job is executed until one attempt is recorded as
 succeeded, failed or dead. In the normal case every attempt runs exactly once; in the
@@ -398,7 +398,7 @@ What happens when…
 | LISTEN connection drops | polling continues; the listener reconnects with backoff and triggers a claim |
 | Postgres restarts | workers log errors and resume when it is back; committed jobs are durable |
 
-## 📊 Benchmarks
+## Benchmarks
 
 Measured with [`bench/bench.py`](bench/bench.py) on the author's laptop, so read them as an
 order of magnitude, not a promise:
@@ -444,7 +444,7 @@ Observations:
 
 Reproduce: `docker compose up -d postgres && uv run python -m bench.bench`.
 
-## 🧱 Design decisions and trade-offs
+## Design decisions and trade-offs
 
 **Postgres as the broker.** Transactional enqueue, one system to back up and monitor,
 SQL as the debugging tool (`SELECT * FROM pgqueue_jobs WHERE status = 'dead'`). The price:
@@ -490,7 +490,7 @@ make double firing impossible, so there is no election to get wrong.
 rather than httpx (which pulls in certifi, MPL-2.0) and why the stress tests use seeded
 randomness instead of Hypothesis (MPL-2.0).
 
-## 🤔 When to use something else
+## When to use something else
 
 pgqueue is a personal project, not a replacement for established tools. Celery, RQ,
 Dramatiq, Procrastinate and pg-boss are mature, widely used and solve problems pgqueue
@@ -513,7 +513,7 @@ deliberately does not. A rough guide:
 What pgqueue focuses on is a small, readable codebase in which transactional enqueue,
 typed payloads and the failure semantics above are explicit and covered by tests.
 
-## 🚧 Limitations
+## Limitations
 
 - **Throughput is bounded by Postgres writes**: a few thousand jobs per second on a laptop,
   two transactions per job. Not a fit for event streaming.
@@ -536,7 +536,7 @@ typed payloads and the failure semantics above are explicit and covered by tests
 - **One database is one failure domain**: if Postgres is down, so is the queue (and,
   usually, the application it serves).
 
-## 🛠 Tech stack
+## Tech stack
 
 | Layer | Used |
 |---|---|
@@ -545,7 +545,7 @@ typed payloads and the failure semantics above are explicit and covered by tests
 | Database | PostgreSQL 16, 17, 18 |
 | Quality | pytest, pytest-asyncio, ruff, mypy (strict) |
 
-## 🧪 Development
+## Development
 
 ```console
 $ docker compose up -d postgres         # Postgres 17 on localhost:55432
@@ -563,11 +563,11 @@ Project layout: `src/pgqueue` (library, CLI, admin), `tests`, `examples` (the co
 `demo` (the public live demo: workload, workers, read-only server), `deploy/termux`
 (self-hosting scripts), `bench` (benchmarks).
 
-## 📝 Changelog
+## Changelog
 
 See [`CHANGELOG.md`](CHANGELOG.md).
 
-## 📄 Licence
+## Licence
 
 [MIT](LICENSE) © 2026 Maciej Zieliński. Third-party components and their licenses are
 listed in [`3rdparty_licenses.md`](3rdparty_licenses.md).
