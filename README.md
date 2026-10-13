@@ -1,13 +1,17 @@
 # pgqueue
 
+**A background job queue that runs on the PostgreSQL you already have.** No Redis, no
+RabbitMQ, no second system to operate, back up and keep consistent with your data.
+
+**[Live demo](https://pgqueue.maciejzielinski.dev)** · [Status](https://status.maciejzielinski.dev) · [Portfolio](https://maciejzielinski.dev)
+
+The live demo is a read-only dashboard over a synthetic workload on a real PostgreSQL. Watch jobs retry, die and get recovered after a worker is killed.
+
 [![CI](https://github.com/MaciejZiel/pgqueue/actions/workflows/ci.yml/badge.svg)](https://github.com/MaciejZiel/pgqueue/actions/workflows/ci.yml)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776ab)
 ![PostgreSQL 16 | 17 | 18](https://img.shields.io/badge/postgres-16%20%7C%2017%20%7C%2018-336791)
 ![mypy strict](https://img.shields.io/badge/mypy-strict-2a6db2)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
-**A background job queue that runs on the PostgreSQL you already have.** No Redis, no
-RabbitMQ, no second system to operate, back up and keep consistent with your data.
 
 pgqueue is a small job queue library built around one PostgreSQL feature: `SELECT … FOR UPDATE SKIP LOCKED`. It gives you typed tasks, retries
 with backoff, a dead-letter state, scheduled and cron jobs, crash recovery through leases,
