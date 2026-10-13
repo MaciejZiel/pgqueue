@@ -405,15 +405,18 @@ Celery on Valkey (the BSD-licensed Redis fork) with the same no-op handler, the 
 2 KiB JSON payload and 32 job slots per worker process. Workers are separate processes
 started through the real CLI. Each cell is repeated 5 times. The full method, every table,
 the SKIP LOCKED explanation and the caveats are in [`docs/benchmarks.md`](docs/benchmarks.md);
-raw per-run numbers are in [`bench/results.json`](bench/results.json).
+raw per-run numbers are in [`bench/results.json`](bench/results.json). The benchmark script
+now alternates which system runs first and pauses between them; the numbers here predate that
+change (see the doc).
 
 Read the numbers with these caveats first: one 13th Gen Intel i5-13500H laptop (16 threads,
 14 GiB RAM) running Postgres 17 with default settings, Valkey, the workers and the load
 generator together, **and busy with unrelated work during the runs** (1-minute load average
 between 2 and 38). Run-to-run spread is large, so cells are the median with the minimum and
-maximum run in brackets.
+maximum run in brackets. This is a first run: the order was fixed (pgqueue first, then
+Celery), so it is not counterbalanced, and it has not been repeated on a quiet machine.
 
-| Backlog of 20,000 jobs, jobs/s | pgqueue | Celery + Valkey |
+| Backlog of 20,000 jobs, jobs/s | pgqueue | Celery (thread pool, 32 threads, prefetch x4, early ack) |
 |---:|---:|---:|
 | 1 worker process | 825 (725-1,399) | 349 (280-499) |
 | 2 worker processes | 1,702 (1,427-2,528) | 722 (574-1,268) |
@@ -424,16 +427,30 @@ maximum run in brackets.
 
 What this does and does not show:
 
-- Within each run the two systems were measured seconds apart under the same load, and
-  pgqueue was faster in every run at 1, 2 and 4 workers and in 4 of 5 runs at 8 workers.
-  The absolute numbers moved by a factor of two to three with how busy the machine was.
+- The robust result is at 1 and 2 worker processes: pgqueue was about 2 times faster
+  (1.8 to 2.8 times) in all 5 runs. At 4 and 8 workers the claim is weaker. On the two
+  quietest runs (4 and 5, load about 3 to 6) the two were roughly even at 8 workers
+  (ratios 0.84 and 1.38) and pgqueue led by 1.21 and 2.16 at 4 workers. In the 4-worker
+  payload-size scenario Celery won some runs: at 2 KiB the ratios were 3.52, 2.23, 0.89,
+  1.44 and 1.43, and at 256 B pgqueue lost 2 of 5 runs and its median was below Celery's
+  (2,998 against 3,163 jobs/s). Within a run pgqueue was always measured first and Celery
+  a few seconds after, so the order is not counterbalanced, and the load was not the same
+  for both halves. The absolute numbers moved by up to a factor of four with how busy the
+  machine was.
+- The two are not equal in durability. pgqueue commits the claim and the completion of
+  each job with an fsync; this Celery setup acknowledges early (`acks_late=False`, a crash
+  loses in-flight tasks) on a Valkey without persistence. So the drain comparison is a
+  durable queue against a non-durable one.
 - Enqueue is where Postgres pays for durability: a single `enqueue()` call (one fsynced
   commit) took a median of 4.4 ms at 184 jobs/s for one client, against 1.7 ms and 566
   jobs/s for a Celery publish to a Valkey without persistence. `enqueue_many` inserted
   1,000 jobs per call at 6,188 jobs/s (median; range 5,181 to 14,792).
-- Pickup latency (enqueue to handler start, 200 jobs/s into idle workers) had a p50 of
-  4.5 to 7.3 ms for pgqueue and 3.5 to 4.5 ms for Celery depending on the worker count;
-  pgqueue's p99 was 15 to 38 ms, Celery's 6 to 11 ms.
+- Pickup latency at 200 jobs/s into idle workers had a p50 of 4.5 to 7.3 ms for pgqueue
+  and 3.5 to 4.5 ms for Celery depending on the worker count; pgqueue's p99 was 15 to
+  38 ms, Celery's 6 to 11 ms. The intervals differ: pgqueue's runs from `created_at`
+  (before the fsynced insert commit) to `started_at` (set in the claim statement), Celery's
+  from just before `apply_async` serialises the message to the start of the handler. The
+  ratios are not like-for-like.
 - Not measured: a real handler workload, other Celery pools (prefork, gevent), RQ, separate
   database and worker hosts, tuned Postgres, Valkey with persistence, tables of millions
   of rows.
