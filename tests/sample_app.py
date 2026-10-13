@@ -33,3 +33,15 @@ async def record(ctx: JobContext) -> None:
         ctx.attempt,
         str(os.getpid()),
     )
+
+
+@app.task(name="stress.slow_record", max_attempts=20)
+async def slow_record(payload: Sleep, ctx: JobContext) -> None:
+    """Used by the SIGKILL test: log the start of every attempt, then take a while."""
+    await app.pool.execute(
+        "INSERT INTO stress_executions VALUES ($1, $2, $3, false)",
+        ctx.job_id,
+        ctx.attempt,
+        str(os.getpid()),
+    )
+    await asyncio.sleep(payload.seconds)

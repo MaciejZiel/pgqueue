@@ -55,6 +55,7 @@ class WorkerOut(BaseModel):
     pid: int
     queues: list[str]
     concurrency: int
+    lease_seconds: float
     in_flight: int
     processed: int
     failed: int
@@ -84,3 +85,73 @@ class Overview(BaseModel):
 
 class RequeueResult(BaseModel):
     requeued: int
+
+
+class ThroughputSecond(BaseModel):
+    second: datetime
+    succeeded: int
+    failed: int
+
+
+class LatencyStats(BaseModel):
+    """Percentiles in seconds over the jobs that finished within the window."""
+
+    p50: float | None
+    p95: float | None
+    samples: int
+
+
+class LiveStats(BaseModel):
+    window_seconds: int
+    jobs_per_second: float
+    """Finished jobs per second, averaged over the last ten seconds."""
+    throughput: list[ThroughputSecond]
+    pickup: LatencyStats
+    """Time between a job becoming due and a worker claiming it."""
+    run: LatencyStats
+    """Handler time of succeeded jobs, from claim to completion."""
+    retries: int
+    """Extra attempts (beyond the first) used by the jobs that finished in the window."""
+    failures: int
+    """Jobs that ended failed or dead within the window."""
+
+
+class RunningJob(BaseModel):
+    id: int
+    task: str
+    queue: str
+    attempts: int
+    max_attempts: int
+    locked_by: str
+    started_at: datetime
+    heartbeat_at: datetime | None
+    locked_until: datetime
+
+
+class FeedItem(BaseModel):
+    id: int
+    task: str
+    queue: str
+    status: JobStatus
+    attempts: int
+    max_attempts: int
+    at: datetime
+    """When the job last changed state."""
+    duration: float | None
+    """Handler time in seconds, when the job has finished an attempt."""
+    error: str | None
+    """Last line of the last error."""
+
+
+class Snapshot(BaseModel):
+    """Everything the live dashboard shows, computed once and shared by all viewers."""
+
+    now: datetime
+    read_only: bool
+    totals: dict[JobStatus, int]
+    queues: list[QueueStats]
+    workers: list[WorkerOut]
+    running: list[RunningJob]
+    periodic: list[PeriodicOut]
+    stats: LiveStats
+    feed: list[FeedItem]

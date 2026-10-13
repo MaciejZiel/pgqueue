@@ -3,38 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>pgqueue · dashboard</title>
+  <meta name="color-scheme" content="light dark">
+  <title>pgqueue · live dashboard</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%233b7ddd'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="{{ url_for('static', path='dashboard.css') }}?v={{ version }}">
+  <link rel="stylesheet" href="static/dashboard.css?v={{ version }}">
 </head>
-<body>
+<body data-read-only="{{ 'true' if read_only else 'false' }}">
+  <a class="skip" href="#main">Skip to the dashboard</a>
   <header class="topbar">
     <div class="brand">
       <span class="logo" aria-hidden="true"></span>
       <span class="name">pgqueue</span>
       <span class="version">v{{ version }}</span>
+      {% if read_only %}<span class="badge" title="No endpoint that changes state is exposed">read-only</span>{% endif %}
     </div>
-    <div class="status">
-      <span id="live-dot" class="dot"></span>
-      <span id="live-text">connecting…</span>
+    <nav class="status" aria-label="Dashboard controls">
+      <a class="nav-link" href="#how">How it works</a>
+      <span id="live-dot" class="dot" aria-hidden="true"></span>
+      <span id="live-text" role="status">connecting…</span>
       <button id="pause" class="ghost" type="button" aria-pressed="false">Pause</button>
-    </div>
+    </nav>
   </header>
 
-  <main>
-    <section class="kpis" aria-label="Totals">
-      <div class="kpi"><span class="label">Queued</span><span class="value" id="kpi-ready">–</span></div>
-      <div class="kpi"><span class="label">Running</span><span class="value running" id="kpi-running">–</span></div>
-      <div class="kpi"><span class="label">Retrying</span><span class="value retrying" id="kpi-retrying">–</span></div>
-      <div class="kpi"><span class="label">Failed</span><span class="value failed" id="kpi-failed">–</span></div>
-      <div class="kpi"><span class="label">Dead</span><span class="value failed" id="kpi-dead">–</span></div>
-      <div class="kpi"><span class="label">Succeeded / min</span><span class="value succeeded" id="kpi-rate">–</span></div>
-      <div class="kpi"><span class="label">Workers</span><span class="value" id="kpi-workers">–</span></div>
+  {% if banner %}<p class="banner">{{ banner }}</p>{% endif %}
+
+  <main id="main">
+    <section class="hero" aria-label="Headline numbers">
+      <div class="kpi big">
+        <span class="label">Throughput</span>
+        <span class="value" id="kpi-rate">–</span>
+        <span class="unit">jobs / second</span>
+      </div>
+      <div class="kpi">
+        <span class="label">Pickup latency</span>
+        <span class="value small" id="kpi-pickup">–</span>
+        <span class="unit">p50 / p95 · due to claimed</span>
+      </div>
+      <div class="kpi">
+        <span class="label">Run time</span>
+        <span class="value small" id="kpi-run">–</span>
+        <span class="unit">p50 / p95 · handler</span>
+      </div>
+      <div class="kpi"><span class="label">Waiting</span><span class="value" id="kpi-ready">–</span><span class="unit">queued + retrying</span></div>
+      <div class="kpi"><span class="label">Running</span><span class="value running" id="kpi-running">–</span><span class="unit">holding a lease</span></div>
+      <div class="kpi"><span class="label">Retries</span><span class="value retrying" id="kpi-retries">–</span><span class="unit">last 60 s</span></div>
+      <div class="kpi"><span class="label">Failed</span><span class="value failed" id="kpi-failed">–</span><span class="unit" id="kpi-failed-unit">last 60 s</span></div>
     </section>
 
-    <section class="panel">
+    <section class="panel" aria-labelledby="h-throughput">
       <div class="panel-head">
-        <h2>Throughput <span class="muted">· finished jobs per minute, last hour</span></h2>
+        <h2 id="h-throughput">Throughput <span class="muted">· finished jobs per second, last two minutes</span></h2>
         <div class="legend">
           <span><i class="swatch succeeded"></i>succeeded</span>
           <span><i class="swatch failed"></i>failed / dead</span>
@@ -43,46 +61,44 @@
       <div class="chart" id="chart" role="img" aria-label="Throughput chart"></div>
     </section>
 
+    <section class="panel" aria-labelledby="h-queues">
+      <div class="panel-head"><h2 id="h-queues">Queues <span class="muted">· depth over the last two minutes</span></h2></div>
+      <div class="queues" id="queues"><p class="empty">No jobs yet</p></div>
+    </section>
+
     <div class="grid">
-      <section class="panel">
-        <div class="panel-head"><h2>Queues</h2></div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Queue</th><th class="num">Queued</th><th class="num">Running</th>
-                <th class="num">Retrying</th><th class="num">Succeeded</th>
-                <th class="num">Failed</th><th class="num">Dead</th><th class="num">Lag</th>
-              </tr>
-            </thead>
-            <tbody id="queues"><tr><td colspan="8" class="empty">No jobs yet</td></tr></tbody>
-          </table>
-        </div>
+      <section class="panel" aria-labelledby="h-workers">
+        <div class="panel-head"><h2 id="h-workers">Workers <span class="muted" id="workers-count"></span> <span class="muted">· heartbeats and leases</span></h2></div>
+        <div class="workers" id="workers"><p class="empty">No workers running</p></div>
       </section>
 
-      <section class="panel">
-        <div class="panel-head"><h2>Workers</h2></div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Worker</th><th>Queues</th><th>Busy</th>
-                <th class="num">Processed</th><th class="num">Failed</th><th class="num">Seen</th>
-              </tr>
-            </thead>
-            <tbody id="workers"><tr><td colspan="6" class="empty">No workers running</td></tr></tbody>
-          </table>
-        </div>
+      <section class="panel" aria-labelledby="h-feed">
+        <div class="panel-head"><h2 id="h-feed">Live job feed</h2></div>
+        <ol class="feed" id="feed"><li class="empty">Waiting for jobs…</li></ol>
       </section>
     </div>
 
-    <section class="panel">
+    <section class="panel" aria-labelledby="h-leases">
       <div class="panel-head">
-        <h2>Problems</h2>
-        <div class="tabs" role="tablist">
-          <button type="button" role="tab" data-status="dead" aria-selected="true">Dead</button>
+        <h2 id="h-leases">Running jobs <span class="muted">· each one holds a lease that its worker keeps extending</span></h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th class="num">Job</th><th>Task</th><th>Queue</th><th>Worker</th><th class="num">Attempt</th><th class="num">Running</th><th class="num">Lease left</th></tr>
+          </thead>
+          <tbody id="leases"><tr><td colspan="7" class="empty">Nothing is running right now</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="h-problems">
+      <div class="panel-head">
+        <h2 id="h-problems">Problems</h2>
+        <div class="tabs" role="tablist" aria-label="Problem type">
+          <button type="button" role="tab" data-status="retrying" aria-selected="true">Retrying</button>
+          <button type="button" role="tab" data-status="dead" aria-selected="false">Dead</button>
           <button type="button" role="tab" data-status="failed" aria-selected="false">Failed</button>
-          <button type="button" role="tab" data-status="retrying" aria-selected="false">Retrying</button>
         </div>
       </div>
       <div class="bulk" id="bulk"></div>
@@ -91,7 +107,7 @@
           <thead>
             <tr>
               <th class="num">Job</th><th>Task</th><th>Queue</th><th class="num">Attempts</th>
-              <th>Last error</th><th class="num">When</th><th></th>
+              <th>Last error</th><th class="num">When</th><th class="actions-col"></th>
             </tr>
           </thead>
           <tbody id="problems"><tr><td colspan="7" class="empty">Nothing here</td></tr></tbody>
@@ -99,8 +115,8 @@
       </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head"><h2>Periodic schedules</h2></div>
+    <section class="panel" aria-labelledby="h-periodic">
+      <div class="panel-head"><h2 id="h-periodic">Periodic schedules</h2></div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -110,7 +126,117 @@
         </table>
       </div>
     </section>
+
+    <section class="panel explainer" id="how" aria-labelledby="h-how">
+      <div class="panel-head"><h2 id="h-how">How it works</h2></div>
+      <p class="lede">
+        Every job is a row in one PostgreSQL table. There is no broker: Postgres is the queue,
+        and three of its features do the heavy lifting.
+      </p>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 760 270" role="img" aria-labelledby="diagram-title diagram-desc">
+          <title id="diagram-title">Producers insert jobs into PostgreSQL; workers claim them with SKIP LOCKED</title>
+          <desc id="diagram-desc">
+            Producers insert rows into the pgqueue_jobs table. A trigger sends NOTIFY to idle workers.
+            Workers claim rows with SELECT FOR UPDATE SKIP LOCKED, extend their leases with heartbeats,
+            and write the result back. A reaper recovers jobs whose lease expired.
+          </desc>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" class="arrowhead"/>
+            </marker>
+          </defs>
+          <g class="node">
+            <rect x="10" y="20" width="140" height="64" rx="10"/>
+            <text x="80" y="48" class="t1">producers</text>
+            <text x="80" y="66" class="t2">enqueue() · cron</text>
+          </g>
+          <g class="node db">
+            <rect x="260" y="10" width="250" height="250" rx="14"/>
+            <text x="385" y="34" class="t1">PostgreSQL</text>
+            <rect x="280" y="48" width="210" height="64" rx="8" class="inner"/>
+            <text x="385" y="74" class="t1">pgqueue_jobs</text>
+            <text x="385" y="94" class="t2">partial index on ready jobs</text>
+            <rect x="280" y="126" width="210" height="44" rx="8" class="inner"/>
+            <text x="385" y="153" class="t2">trigger → NOTIFY pgqueue_jobs</text>
+            <rect x="280" y="184" width="210" height="62" rx="8" class="inner"/>
+            <text x="385" y="210" class="t1">pgqueue_workers</text>
+            <text x="385" y="230" class="t2">heartbeats · leases</text>
+          </g>
+          <g class="node">
+            <rect x="620" y="14" width="130" height="66" rx="10"/>
+            <text x="685" y="42" class="t1">worker A</text>
+            <text x="685" y="60" class="t2">claim · run · ack</text>
+            <rect x="620" y="100" width="130" height="66" rx="10"/>
+            <text x="685" y="128" class="t1">worker B</text>
+            <text x="685" y="146" class="t2">claim · run · ack</text>
+            <rect x="620" y="186" width="130" height="66" rx="10"/>
+            <text x="685" y="214" class="t1">worker C</text>
+            <text x="685" y="232" class="t2">claim · run · ack</text>
+          </g>
+          <path d="M150 52 H258" class="edge" marker-end="url(#arrow)"/>
+          <text x="204" y="44" class="t3">1 · INSERT</text>
+          <path d="M618 38 L492 68" class="edge" marker-end="url(#arrow)"/>
+          <text x="556" y="30" class="t3" text-anchor="middle">3 · SKIP LOCKED</text>
+          <path d="M490 150 L618 126" class="edge dashed" marker-end="url(#arrow)"/>
+          <path d="M490 154 L618 200" class="edge dashed" marker-end="url(#arrow)"/>
+          <text x="545" y="178" class="t3" text-anchor="middle">2 · NOTIFY</text>
+          <path d="M618 244 L492 222" class="edge" marker-end="url(#arrow)"/>
+          <text x="556" y="262" class="t3" text-anchor="middle">4 · heartbeat</text>
+        </svg>
+        <figcaption>Solid arrows are SQL statements, dashed arrows are LISTEN/NOTIFY wake-ups.</figcaption>
+      </figure>
+
+      <div class="cards">
+        <article>
+          <h3>SKIP LOCKED claiming</h3>
+          <p>
+            Workers claim a batch of jobs with <code>SELECT … FOR UPDATE SKIP LOCKED</code> inside a single
+            <code>UPDATE</code>. Rows another worker already holds are skipped instead of waited on, so
+            any number of workers pull different jobs at once and never block each other.
+          </p>
+          <pre><code>UPDATE pgqueue_jobs SET status = 'running', …
+FROM (SELECT id FROM pgqueue_jobs
+      WHERE status IN ('queued','retrying')
+        AND run_at &lt;= now()
+      ORDER BY priority DESC, run_at, id
+      LIMIT 8
+      FOR UPDATE SKIP LOCKED) AS next</code></pre>
+        </article>
+        <article>
+          <h3>Leases and crash recovery</h3>
+          <p>
+            A running job holds a lease that its worker extends with heartbeats. If a worker dies,
+            its leases run out and a reaper in every other worker puts the jobs back with the attempt
+            counted. A result is accepted only from the current lease holder, so a stalled worker
+            cannot overwrite a newer one (fencing).
+          </p>
+        </article>
+        <article>
+          <h3>LISTEN / NOTIFY</h3>
+          <p>
+            A trigger sends <code>NOTIFY</code> on every insert, so idle workers wake in milliseconds
+            instead of waiting for the next poll. Polling stays as the fallback: a lost notification
+            costs latency, never a job.
+          </p>
+        </article>
+        <article>
+          <h3>Retries and dead letters</h3>
+          <p>
+            Failed attempts are retried with capped exponential backoff and jitter. A task may ask for a
+            specific delay (<code>Retry-After</code>) or fail permanently. Jobs that use up every attempt
+            end up <em>dead</em> and stay visible until someone requeues them.
+          </p>
+        </article>
+      </div>
+    </section>
   </main>
+
+  <footer class="footer">
+    <span>pgqueue v{{ version }}: a job queue on the PostgreSQL you already have.</span>
+    <a href="https://github.com/MaciejZiel/pgqueue">Source on GitHub</a>
+  </footer>
 
   <aside id="drawer" class="drawer" hidden aria-labelledby="drawer-title">
     <div class="drawer-head">
@@ -127,6 +253,6 @@
   </aside>
 
   <div id="toast" class="toast" hidden></div>
-  <script src="{{ url_for('static', path='dashboard.js') }}?v={{ version }}"></script>
+  <script src="static/dashboard.js?v={{ version }}"></script>
 </body>
 </html>

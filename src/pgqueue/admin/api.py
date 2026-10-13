@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from pgqueue import __version__
 from pgqueue.admin import queries
+from pgqueue.admin.live import LiveFeed, TooManySubscribers
 from pgqueue.admin.metrics import render as render_metrics
-from pgqueue.admin.schemas import JobOut, JobPage, Overview, RequeueResult
+from pgqueue.admin.schemas import JobOut, JobPage, Overview, RequeueResult, Snapshot
 from pgqueue.dsn import sqlalchemy_url
 from pgqueue.schema import JobStatus
 
@@ -75,7 +76,18 @@ def _parse_statuses(raw: str | None) -> list[JobStatus]:
 
 Engine = Annotated[AsyncEngine, Depends(_engine)]
 
+
+def _feed(request: Request) -> LiveFeed:
+    feed: LiveFeed = request.app.state.feed
+    return feed
+
+
+Feed = Annotated[LiveFeed, Depends(_feed)]
+
 api = APIRouter(prefix="/api", dependencies=[Depends(_authenticate)])
+# Everything that changes state lives on its own router, so a read-only
+# deployment simply never mounts it: the endpoints do not exist at all.
+actions = APIRouter(prefix="/api", dependencies=[Depends(_authenticate)])
 
 
 @api.get("/overview")
@@ -117,7 +129,45 @@ async def get_job(engine: Engine, job_id: int) -> JobOut:
     return job
 
 
-@api.post("/jobs/{job_id}/requeue", dependencies=[Depends(_require_action_header)])
+@api.get("/live", response_model=Snapshot)
+async def get_live(feed: Feed) -> Response:
+    """The dashboard snapshot: counts, workers, leases, latency, throughput and a job feed.
+
+    Computed at most once a second however many clients ask.
+    """
+    return Response(await feed.current(), media_type="application/json")
+
+
+@api.get("/stream")
+async def stream(request: Request, feed: Feed) -> StreamingResponse:
+    """The same snapshots pushed as server-sent events, once a second."""
+
+    async def events() -> AsyncIterator[bytes]:
+        subscription = feed.subscribe()
+        try:
+            try:
+                first = await anext(subscription)
+            except TooManySubscribers:
+                # Lost a race for the last slot after the check below: ask the browser to
+                # come back later (it then gets the 503 and falls back to polling).
+                yield b"retry: 15000\n\n"
+                return
+            yield b": keep-alive\n\n" if first is None else b"data: " + first + b"\n\n"
+            async for payload in subscription:
+                yield b": keep-alive\n\n" if payload is None else b"data: " + payload + b"\n\n"
+        finally:
+            await subscription.aclose()
+
+    if feed.subscribers >= feed.max_subscribers:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "too many live viewers")
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@actions.post("/jobs/{job_id}/requeue", dependencies=[Depends(_require_action_header)])
 async def requeue_job(engine: Engine, job_id: int) -> JobOut:
     """Run a failed, dead or retrying job again now."""
     async with engine.begin() as conn:
@@ -132,7 +182,7 @@ async def requeue_job(engine: Engine, job_id: int) -> JobOut:
     return job
 
 
-@api.post("/queues/{queue}/requeue", dependencies=[Depends(_require_action_header)])
+@actions.post("/queues/{queue}/requeue", dependencies=[Depends(_require_action_header)])
 async def requeue_queue(
     engine: Engine, queue: str, status_: Annotated[JobStatus, Query(alias="status")]
 ) -> RequeueResult:
@@ -150,31 +200,48 @@ def create_app(
     *,
     username: str | None = None,
     password: str | None = None,
+    read_only: bool | None = None,
+    banner: str | None = None,
 ) -> FastAPI:
     """Build the admin application.
 
     Credentials default to ``PGQUEUE_ADMIN_USERNAME``/``PGQUEUE_ADMIN_PASSWORD``;
     when neither is set the admin is unauthenticated (fine behind a VPN or
     in the local demo, not on the open internet).
+
+    ``read_only`` (default: ``PGQUEUE_ADMIN_READ_ONLY``) leaves out every
+    endpoint that changes state, so the dashboard can be shown to the public.
+    ``banner`` is an optional line of text shown at the top of the dashboard.
     """
     username = username or os.environ.get("PGQUEUE_ADMIN_USERNAME")
     password = password or os.environ.get("PGQUEUE_ADMIN_PASSWORD")
+    if read_only is None:
+        read_only = os.environ.get("PGQUEUE_ADMIN_READ_ONLY", "").lower() in ("1", "true", "yes")
     engine = create_async_engine(sqlalchemy_url(dsn), pool_size=5, pool_pre_ping=True)
+    feed = LiveFeed(engine, read_only=read_only)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        await feed.close()
         await engine.dispose()
 
     app = FastAPI(title="pgqueue admin", version=__version__, lifespan=lifespan)
     app.state.engine = engine
+    app.state.feed = feed
     app.state.credentials = (username, password) if username and password else None
     app.include_router(api)
+    if not read_only:
+        app.include_router(actions)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
     @app.get("/", include_in_schema=False, dependencies=[Depends(_authenticate)])
     async def dashboard(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(request, "dashboard.html", {"version": __version__})
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            {"version": __version__, "read_only": read_only, "banner": banner},
+        )
 
     @app.get(
         "/metrics",

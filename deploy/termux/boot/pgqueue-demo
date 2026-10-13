@@ -1,0 +1,19 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux:Boot script. Copy (or symlink) to ~/.termux/boot/pgqueue-demo and make it executable.
+# Assumes PostgreSQL is started by its own boot script; waits for it here.
+termux-wake-lock
+
+REPO="${PGQUEUE_REPO:-$HOME/pgqueue}"
+LOG="$HOME/.local/state/pgqueue-demo.log"
+mkdir -p "$(dirname "$LOG")"
+
+for _ in $(seq 1 60); do
+  pg_isready -q && break
+  sleep 2
+done
+
+# Restart if it ever exits; this loop is the only supervisor needed.
+while true; do
+  "$REPO/deploy/termux/start.sh" >>"$LOG" 2>&1
+  sleep 5
+done

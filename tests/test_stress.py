@@ -276,3 +276,92 @@ async def test_jobs_survive_a_worker_losing_its_database(clean_db: str) -> None:
     finally:
         for app in apps[:2]:
             await app.close()
+
+
+async def test_sigkilled_workers_neither_lose_nor_double_run_jobs(app: PgQueue) -> None:
+    """Chaos with real processes: workers are SIGKILLed mid-job, over and over.
+
+    A killed worker cannot release its jobs or say goodbye; its leases just stop
+    being extended. Every job must still succeed, and a job may only run again
+    after the process that ran it before was killed (its lease expired): two live
+    workers never run the same job, and no attempt number is ever run twice.
+    """
+    await _reset(app)
+    jobs = 300
+    await app.pool.execute(
+        "INSERT INTO pgqueue_jobs (task, payload, max_attempts) "
+        "SELECT 'stress.slow_record', jsonb_build_object('seconds', 0.2 + (g % 5) * 0.1), 20 "
+        "FROM generate_series(1, $1) AS g",
+        jobs,
+    )
+    env = {**os.environ, "PGQUEUE_TEST_DSN": app.dsn}
+
+    async def spawn() -> asyncio.subprocess.Process:
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "pgqueue",
+            "--log-level",
+            "ERROR",
+            "worker",
+            "tests.sample_app:app",
+            "--concurrency",
+            "8",
+            "--lease",
+            "1.5",
+            "--poll-interval",
+            "0.1",
+            "--no-periodic",
+            cwd=ROOT,
+            env=env,
+        )
+
+    processes = [await spawn() for _ in range(3)]
+    killed: set[str] = set()
+    rng = random.Random(7)
+    try:
+        for _ in range(6):
+            await asyncio.sleep(rng.uniform(0.8, 1.6))
+            busy = await app.pool.fetch(
+                "SELECT DISTINCT split_part(locked_by, ':', 2) AS pid "
+                "FROM pgqueue_jobs WHERE status = 'running'"
+            )
+            alive = {str(p.pid): p for p in processes if p.returncode is None}
+            candidates = [row["pid"] for row in busy if row["pid"] in alive]
+            if not candidates:
+                continue
+            victim = alive[rng.choice(candidates)]
+            victim.kill()  # SIGKILL: no release, no deregistration
+            await victim.wait()
+            killed.add(str(victim.pid))
+            processes.append(await spawn())
+        await wait_until(lambda: _drained(app), within=120, interval=0.2)
+    finally:
+        for proc in processes:
+            if proc.returncode is None:
+                proc.terminate()
+        await asyncio.gather(*(proc.wait() for proc in processes))
+
+    assert len(killed) >= 3
+    rows = await app.pool.fetch("SELECT id, status::text, attempts FROM pgqueue_jobs")
+    assert len(rows) == jobs
+    assert {row["status"] for row in rows} == {"succeeded"}, "a job was lost or dead-lettered"
+    attempts = {row["id"]: row["attempts"] for row in rows}
+
+    executions = await app.pool.fetch(
+        "SELECT job_id, attempt, worker FROM stress_executions ORDER BY job_id, attempt"
+    )
+    runs: dict[int, list[tuple[int, str]]] = defaultdict(list)
+    for row in executions:
+        runs[row["job_id"]].append((row["attempt"], row["worker"]))
+    assert set(runs) == set(attempts), "every job ran at least once"
+    rerun = 0
+    for job_id, history in runs.items():
+        numbers = [attempt for attempt, _ in history]
+        assert len(numbers) == len(set(numbers)), (job_id, history)  # no attempt ran twice
+        assert numbers[-1] == attempts[job_id], (job_id, history)  # the final attempt ran
+        # Every earlier run of this job was cut short by a SIGKILL, never by a live rival.
+        for _, worker in history[:-1]:
+            assert worker in killed, (job_id, history, killed)
+        rerun += len(history) > 1
+    assert rerun >= 1, "no job was in flight when a worker was killed"
