@@ -22,7 +22,7 @@ services:
       POSTGRES_PASSWORD: pgqueue
       POSTGRES_DB: pgqueue
     ports:
-      - "55432:5432"
+      - "${PG_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pgqueue -d pgqueue"]
       interval: 2s
@@ -66,6 +66,20 @@ services:
     environment:
       PGQUEUE_DSN: postgresql://pgqueue:pgqueue@postgres:5432/pgqueue
       PRODUCER_RATE: "15"
+
+  # Only for `make bench`: the broker for the Celery comparison. Valkey is the
+  # BSD-3-Clause fork of Redis; persistence is off, as in a typical speed-first setup.
+  valkey:
+    image: valkey/valkey:8-alpine
+    profiles: ["bench"]
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_PORT:-56379}:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   pgdata:

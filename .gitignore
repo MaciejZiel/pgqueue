@@ -11,3 +11,4 @@ build/
 htmlcov/
 .env
 .playwright-cli/
+bench/results-quick.json
