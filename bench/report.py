@@ -14,6 +14,8 @@ from typing import Any
 
 RESULTS = Path(__file__).resolve().parent.parent / "bench" / "results.json"
 NAMES = {"pgqueue": "pgqueue", "celery": "Celery + Valkey"}
+# Column headers say which Celery configuration the numbers belong to.
+HEADS = {"pgqueue": "pgqueue", "celery": "Celery (thread pool, 32 threads, prefetch x4, early ack)"}
 
 
 def get(rec: dict[str, Any], key: str) -> float:
@@ -58,7 +60,7 @@ def main() -> None:
                 print(f"| {label} | {NAMES[s]} | " + " | ".join(cols) + " |")
 
     print("\n### Backlog throughput (jobs/s)\n")
-    print("| Worker processes | " + " | ".join(NAMES[s] for s in systems) + " |")
+    print("| Worker processes | " + " | ".join(HEADS[s] for s in systems) + " |")
     print("|---:|" + "---:|" * len(systems))
     for w in workers:
         row = [
@@ -77,7 +79,7 @@ def main() -> None:
             print(f"| {w} | {NAMES[s]} | " + " | ".join(cols) + " |")
 
     print("\n### Payload size, 4 workers, backlog throughput (jobs/s)\n")
-    print("| Payload | " + " | ".join(NAMES[s] for s in systems) + " |")
+    print("| Payload | " + " | ".join(HEADS[s] for s in systems) + " |")
     print("|---|" + "---:|" * len(systems))
     for label, size in (("small", 256), ("medium", 2048), ("large", 16384)):
         row = [
@@ -87,6 +89,11 @@ def main() -> None:
         print(f"| {size:,} B | " + " | ".join(row) + " |")
 
     loads = [float(r["load_1min"]) for r in recs]
+    if data.get("schema_version", 1) < 2:
+        print(
+            "\nResults file schema 1: the order was fixed (pgqueue first, then Celery) and "
+            "one load value was stored per measurement, taken after it."
+        )
     print(
         f"\nOne-minute load average sampled at each measurement: "
         f"min {min(loads):.1f}, median {statistics.median(loads):.1f}, max {max(loads):.1f}."
