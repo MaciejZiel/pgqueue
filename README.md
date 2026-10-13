@@ -197,7 +197,7 @@ Updates arrive over server-sent events (`/api/stream`) with a polling fallback
 load does not depend on how many people are watching (100 concurrent streams cost the demo
 process about 90 MB and under 3 % CPU on a laptop).
 
-<img src="docs/dashboard-mobile.png" alt="The dashboard on a phone" width="260">
+<img src="docs/dashboard-mobile.png" alt="The dashboard on a narrow mobile screen" width="260">
 
 The workload ([`demo/`](demo), separate from the library) is deliberately lively:
 
