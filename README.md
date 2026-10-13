@@ -182,11 +182,18 @@ $ pgqueue prune --older-than-days 14      # e.g. from a nightly cron
 
 ## The live demo
 
-`python -m demo` (or the Termux setup below) starts a self-contained showcase: the
-dashboard in **read-only mode** plus a synthetic workload that keeps it alive. Everything in
-the screenshots below is real: real workers, real jobs, real PostgreSQL.
+The public instance is at <https://pgqueue.maciejzielinski.dev> (uptime on the
+[status page](https://status.maciejzielinski.dev)).
 
-![Full dashboard](docs/dashboard.png)
+**Self-hosted:** it runs on a home server, as plain processes next to a PostgreSQL (see
+[Self-hosting on Termux](#self-hosting-on-termux)), not on a cloud platform.
+
+`python -m demo` (or the Termux setup below) starts the same self-contained showcase locally: the
+dashboard in **read-only mode** plus a synthetic workload that keeps it alive. Everything in
+the screenshots below, captured from the live demo, is real: real workers, real jobs, real
+PostgreSQL.
+
+![Full dashboard at desktop width](docs/dashboard.png)
 
 What is on the page:
 
