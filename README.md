@@ -124,6 +124,9 @@ $ export PGQUEUE_DSN=postgresql://user:pass@localhost/app
 $ pgqueue migrate
 ```
 
+pgqueue is not published on PyPI: the `pgqueue` name there belongs to an unrelated
+project, so install from this repository as shown above.
+
 Define tasks in a module, e.g. `app/jobs.py`:
 
 ```python
