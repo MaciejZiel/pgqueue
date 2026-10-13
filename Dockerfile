@@ -16,6 +16,7 @@ RUN uv sync --locked --no-dev --extra admin --no-install-project
 
 COPY src ./src
 COPY examples ./examples
+COPY demo ./demo
 RUN uv sync --locked --no-dev --extra admin
 
 RUN useradd --system --uid 10001 pgqueue
