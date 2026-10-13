@@ -272,6 +272,6 @@ To rerun on a quiet machine:
 
     make bench ARGS="--runs 6"
 
-A run of 6 repeats takes roughly an hour and a half plus the cool-downs; check
-`uptime` first and do not run other jobs at the same time, otherwise the load columns will
+The run time grows with the number of repeats (the 5-run first run took about an hour,
+before cool-downs); check `uptime` first and do not run other jobs at the same time, otherwise the load columns will
 just document the same problem again.
