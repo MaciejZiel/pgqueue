@@ -349,7 +349,11 @@ async def recent_activity(
     however large the table is.
     """
     at = func.coalesce(jobs.c.finished_at, jobs.c.started_at, jobs.c.created_at)
-    newest = select(func.max(jobs.c.id)).scalar_subquery()
+    # Fetched first and passed as a value: with a subquery the planner cannot see how
+    # narrow the range is and plans a parallel scan of a large part of the table.
+    newest = (await conn.execute(select(func.max(jobs.c.id)))).scalar_one()
+    if newest is None:
+        return []
     rows = await conn.execute(
         select(
             jobs.c.id,
