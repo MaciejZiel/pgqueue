@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from pgqueue import __version__
 from pgqueue.admin import queries
-from pgqueue.admin.live import LiveFeed
+from pgqueue.admin.live import LiveFeed, TooManySubscribers
 from pgqueue.admin.metrics import render as render_metrics
 from pgqueue.admin.schemas import JobOut, JobPage, Overview, RequeueResult, Snapshot
 from pgqueue.dsn import sqlalchemy_url
@@ -145,6 +145,14 @@ async def stream(request: Request, feed: Feed) -> StreamingResponse:
     async def events() -> AsyncIterator[bytes]:
         subscription = feed.subscribe()
         try:
+            try:
+                first = await anext(subscription)
+            except TooManySubscribers:
+                # Lost a race for the last slot after the check below: ask the browser to
+                # come back later (it then gets the 503 and falls back to polling).
+                yield b"retry: 15000\n\n"
+                return
+            yield b": keep-alive\n\n" if first is None else b"data: " + first + b"\n\n"
             async for payload in subscription:
                 yield b": keep-alive\n\n" if payload is None else b"data: " + payload + b"\n\n"
         finally:
