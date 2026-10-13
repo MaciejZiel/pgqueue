@@ -236,7 +236,7 @@
       const age = (now - new Date(w.last_seen_at)) / 1000;
       return el("article", { class: `worker ${w.alive ? "" : "lost"}` },
         el("div", { class: "top" },
-          el("span", { class: "wid", title: `${w.id} · ${w.hostname} pid ${w.pid}` }, shortId(w.id)),
+          el("span", { class: "wid", title: w.hostname ? `${w.id} · ${w.hostname} pid ${w.pid}` : w.id }, shortId(w.id)),
           el("span", { class: "state" }, w.alive ? "alive" : "lost")),
         el("div", { class: "meta-line" },
           el("span", {}, `heartbeat ${age < 1.5 ? "just now" : `${age.toFixed(0)}s ago`}`),

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import ColumnElement, and_, case, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from pgqueue.admin.redact import public_error, worker_label
 from pgqueue.admin.schemas import (
     FeedItem,
     JobOut,
@@ -41,7 +42,16 @@ REQUEUEABLE = (JobStatus.FAILED, JobStatus.DEAD, JobStatus.RETRYING)
 FAILURE_STATUSES = (JobStatus.FAILED, JobStatus.DEAD)
 
 
-async def overview(conn: AsyncConnection, *, minutes: int = 60) -> Overview:
+def _redact_job(job: JobOut) -> JobOut:
+    return job.model_copy(
+        update={
+            "last_error": public_error(job.last_error),
+            "locked_by": worker_label(job.locked_by) if job.locked_by else None,
+        }
+    )
+
+
+async def overview(conn: AsyncConnection, *, minutes: int = 60, redact: bool = False) -> Overview:
     now: datetime = (await conn.execute(select(func.now()))).scalar_one()
 
     queues, totals = await _queue_stats(conn, now)
@@ -50,7 +60,7 @@ async def overview(conn: AsyncConnection, *, minutes: int = 60) -> Overview:
         totals=totals,
         queues=queues,
         throughput=await throughput(conn, now=now, minutes=minutes),
-        workers=await list_workers(conn),
+        workers=await list_workers(conn, redact=redact),
         periodic=await list_periodic(conn),
     )
 
@@ -169,12 +179,18 @@ async def throughput(
     return points
 
 
-async def list_workers(conn: AsyncConnection) -> list[WorkerOut]:
+async def list_workers(conn: AsyncConnection, *, redact: bool = False) -> list[WorkerOut]:
     alive = workers.c.last_seen_at >= func.now() - func.make_interval(
         0, 0, 0, 0, 0, 0, workers.c.lease_seconds
     )
     rows = await conn.execute(select(workers, alive.label("alive")).order_by(workers.c.started_at))
-    return [WorkerOut.model_validate(row._mapping) for row in rows]
+    result = [WorkerOut.model_validate(row._mapping) for row in rows]
+    if redact:
+        result = [
+            w.model_copy(update={"id": worker_label(w.id), "hostname": None, "pid": None})
+            for w in result
+        ]
+    return result
 
 
 async def list_periodic(conn: AsyncConnection) -> list[PeriodicOut]:
@@ -190,6 +206,7 @@ async def list_jobs(
     task: str | None = None,
     before_id: int | None = None,
     limit: int = 50,
+    redact: bool = False,
 ) -> JobPage:
     """Newest first, keyset-paginated on id (stable while jobs are inserted)."""
     conditions: list[ColumnElement[bool]] = []
@@ -207,12 +224,18 @@ async def list_jobs(
         )
     ).all()
     page = [JobOut.model_validate(row._mapping) for row in rows[:limit]]
-    return JobPage(jobs=page, next_before_id=page[-1].id if len(rows) > limit else None)
+    next_before_id = page[-1].id if len(rows) > limit else None
+    if redact:
+        page = [_redact_job(job) for job in page]
+    return JobPage(jobs=page, next_before_id=next_before_id)
 
 
-async def get_job(conn: AsyncConnection, job_id: int) -> JobOut | None:
+async def get_job(conn: AsyncConnection, job_id: int, *, redact: bool = False) -> JobOut | None:
     row = (await conn.execute(select(jobs).where(jobs.c.id == job_id))).first()
-    return JobOut.model_validate(row._mapping) if row is not None else None
+    if row is None:
+        return None
+    job = JobOut.model_validate(row._mapping)
+    return _redact_job(job) if redact else job
 
 
 def _requeue_values() -> dict[str, object]:
@@ -319,7 +342,9 @@ async def live_stats(conn: AsyncConnection, *, now: datetime, window: int = 120)
     )
 
 
-async def running_jobs(conn: AsyncConnection, *, limit: int = 40) -> list[RunningJob]:
+async def running_jobs(
+    conn: AsyncConnection, *, limit: int = 40, redact: bool = False
+) -> list[RunningJob]:
     """Jobs currently holding a lease, most recently started first."""
     rows = await conn.execute(
         select(
@@ -337,11 +362,14 @@ async def running_jobs(conn: AsyncConnection, *, limit: int = 40) -> list[Runnin
         .order_by(jobs.c.started_at.desc())
         .limit(limit)
     )
-    return [RunningJob.model_validate(row._mapping) for row in rows]
+    running = [RunningJob.model_validate(row._mapping) for row in rows]
+    if redact:
+        running = [j.model_copy(update={"locked_by": worker_label(j.locked_by)}) for j in running]
+    return running
 
 
 async def recent_activity(
-    conn: AsyncConnection, *, limit: int = 25, lookback_ids: int = 400
+    conn: AsyncConnection, *, limit: int = 25, lookback_ids: int = 400, redact: bool = False
 ) -> list[FeedItem]:
     """The most recently changed jobs among the newest ``lookback_ids`` ones.
 
@@ -372,7 +400,10 @@ async def recent_activity(
     )
     items = []
     for row in rows:
-        error = row.last_error.strip().splitlines()[-1] if row.last_error else None
+        if redact:
+            error = public_error(row.last_error)
+        else:
+            error = row.last_error.strip().splitlines()[-1] if row.last_error else None
         items.append(
             FeedItem(
                 id=row.id,
@@ -401,9 +432,9 @@ async def snapshot(
         read_only=read_only,
         totals=totals,
         queues=queues,
-        workers=await list_workers(conn),
-        running=await running_jobs(conn),
+        workers=await list_workers(conn, redact=read_only),
+        running=await running_jobs(conn, redact=read_only),
         periodic=await list_periodic(conn),
         stats=await live_stats(conn, now=now),
-        feed=await recent_activity(conn),
+        feed=await recent_activity(conn, redact=read_only),
     )

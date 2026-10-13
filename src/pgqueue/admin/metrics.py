@@ -14,6 +14,7 @@ from prometheus_client.registry import Collector
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from pgqueue.admin.redact import worker_label
 from pgqueue.schema import READY_STATUSES, JobStatus, jobs, periodic, workers
 
 FINISHED = (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.DEAD)
@@ -27,7 +28,7 @@ class _Snapshot(Collector):
         return self.families
 
 
-async def render(conn: AsyncConnection) -> bytes:
+async def render(conn: AsyncConnection, *, redact: bool = False) -> bytes:
     by_state = GaugeMetricFamily(
         "pgqueue_jobs", "Jobs in the table, by queue and status.", labels=["queue", "status"]
     )
@@ -83,10 +84,11 @@ async def render(conn: AsyncConnection) -> bytes:
     for row in await conn.execute(
         select(workers.c.id, workers.c.in_flight, workers.c.processed, workers.c.failed, is_alive)
     ):
-        alive.add_metric([row[0]], 1.0 if row[4] else 0.0)
-        in_flight.add_metric([row[0]], row[1])
-        processed.add_metric([row[0]], row[2])
-        failed.add_metric([row[0]], row[3])
+        worker = worker_label(row[0]) if redact else row[0]
+        alive.add_metric([worker], 1.0 if row[4] else 0.0)
+        in_flight.add_metric([worker], row[1])
+        processed.add_metric([worker], row[2])
+        failed.add_metric([worker], row[3])
 
     next_run = GaugeMetricFamily(
         "pgqueue_periodic_next_run_timestamp_seconds",
