@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Dashboard rebuilt: live updates over server-sent events (polling fallback), throughput
+  per second, pickup and run latency percentiles, queue depth history, workers with
+  heartbeats and leases, running jobs with lease countdowns, a live job feed and a
+  "How it works" explainer. Mobile friendly.
+- Admin `read_only` mode (`create_app(read_only=True)` or `PGQUEUE_ADMIN_READ_ONLY=1`):
+  endpoints that change state are not mounted and the dashboard hides the buttons.
+- `GET /api/live` and `GET /api/stream`: one shared snapshot per second, independent of
+  the number of viewers; `WorkerOut.lease_seconds`.
+- `demo/`: public live demo with a synthetic workload (bursts, failures, retries, cron,
+  simulated worker crashes), bounded retention and a worker supervisor; Termux
+  self-hosting scripts in `deploy/termux/`.
+- The test suite passes on PostgreSQL 18 (verified locally).
+
+### Fixed
+
+- Workers no longer log "lost the lease" for a job that finished while its heartbeat was
+  in flight.
+
 ## [0.1.0] - 2026-10-13
 
 First release.

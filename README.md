@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/MaciejZiel/pgqueue/actions/workflows/ci.yml/badge.svg)](https://github.com/MaciejZiel/pgqueue/actions/workflows/ci.yml)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776ab)
-![PostgreSQL 16 | 17](https://img.shields.io/badge/postgres-16%20%7C%2017-336791)
+![PostgreSQL 16 | 17 | 18](https://img.shields.io/badge/postgres-16%20%7C%2017%20%7C%2018-336791)
 ![mypy strict](https://img.shields.io/badge/mypy-strict-2a6db2)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -14,7 +14,7 @@ with backoff, a dead-letter state, scheduled and cron jobs, crash recovery throu
 LISTEN/NOTIFY wake-ups, a dashboard and Prometheus metrics, and it lets you enqueue a job
 **in the same transaction** as the data it refers to.
 
-![pgqueue dashboard](docs/dashboard.png)
+![The live dashboard, recorded against the demo workload](docs/dashboard-live.gif)
 
 ```python
 from pydantic import BaseModel
@@ -58,6 +58,8 @@ $ pgqueue admin --port 8080          # dashboard, JSON API and /metrics
 - [Why a queue in Postgres?](#why-a-queue-in-postgres)
 - [Features](#features)
 - [Quick start](#quick-start)
+- [The live demo](#the-live-demo)
+- [Self-hosting on Termux](#self-hosting-on-termux)
 - [Architecture](#architecture)
 - [Guarantees and failure semantics](#guarantees-and-failure-semantics)
 - [Benchmarks](#benchmarks)
@@ -170,6 +172,81 @@ $ pgqueue worker app.jobs:app -q webhooks,default -c 50 --metrics-port 9100
 $ PGQUEUE_ADMIN_USERNAME=ops PGQUEUE_ADMIN_PASSWORD=… pgqueue admin --host 0.0.0.0
 $ pgqueue prune --older-than-days 14      # e.g. from a nightly cron
 ```
+
+## The live demo
+
+`python -m demo` (or the Termux setup below) starts a self-contained showcase: the
+dashboard in **read-only mode** plus a synthetic workload that keeps it alive. Everything in
+the screenshots below is real: real workers, real jobs, real PostgreSQL.
+
+![Full dashboard](docs/dashboard.png)
+
+What is on the page:
+
+- **Throughput and latency**: finished jobs per second (two-minute chart), and p50/p95 of the
+  *pickup latency* (due until claimed) and the *run time*, computed from the jobs' own
+  timestamps.
+- **Queue depth** per queue over time, with running, retrying and dead counts and queue lag.
+- **Workers** with heartbeat age, slots in use and lease length, plus every **running job**
+  with a counting-down lease.
+- A **live job feed** and the problem lists (retrying, dead, failed) with the last error.
+- Periodic (cron) schedules and a **"How it works"** explainer with a diagram.
+
+Updates arrive over server-sent events (`/api/stream`) with a polling fallback
+(`/api/live`). One snapshot is computed per second and shared by all viewers, so the database
+load does not depend on how many people are watching (100 concurrent streams cost the demo
+process about 90 MB and under 3 % CPU on a laptop).
+
+<img src="docs/dashboard-mobile.png" alt="The dashboard on a phone" width="260">
+
+The workload ([`demo/`](demo), separate from the library) is deliberately lively:
+
+- five job types with realistic durations: e-mails (SMTP flakiness), image resizing (sync
+  handler on the thread pool, with a timeout), payments (`Retry-After`, declined cards),
+  webhooks to a flaky endpoint (backoff, then dead letters) and slow report exports;
+- two cron schedules (`* * * * *` and `*/5 * * * *`), delayed jobs, traffic bursts inserted
+  with one `enqueue_many`, and backpressure so the demo never buries itself;
+- **real worker processes**; every couple of minutes one is killed with `SIGKILL`. Its leases
+  expire, another worker's reaper recovers the jobs (`lease expired: worker ... stopped
+  heart-beating`), and the supervisor starts a replacement;
+- bounded storage: finished jobs are deleted after ten minutes and capped at 6000 rows,
+  dead workers are forgotten after 30 s.
+
+The public dashboard exposes **no endpoint that changes state**: in read-only mode
+(`create_app(dsn, read_only=True)` or `PGQUEUE_ADMIN_READ_ONLY=1`) the requeue routes are not
+mounted at all, and the buttons are not rendered. Settings are environment variables, listed in
+[`deploy/termux/env.example`](deploy/termux/env.example).
+
+```console
+$ export PGQUEUE_DSN=postgresql://user:pass@127.0.0.1/pgqueue_demo
+$ python -m demo            # migrates, then serves http://127.0.0.1:8080
+```
+
+## Self-hosting on Termux
+
+The demo runs as plain processes (no Docker) on an Android phone with Termux, PostgreSQL 18
+and nginx. The scripts live in [`deploy/termux/`](deploy/termux). Roughly 270 MB of RAM for
+the Python processes with the defaults (three workers).
+
+```console
+$ pkg install python postgresql nginx clang make rust libffi openssl git
+$ git clone https://github.com/MaciejZiel/pgqueue ~/pgqueue && cd ~/pgqueue
+$ deploy/termux/install.sh                                   # venv; compiles asyncpg and greenlet
+$ DEMO_DB_PASSWORD=... deploy/termux/setup-db.sh             # role + database pgqueue_demo
+$ mkdir -p ~/.config/pgqueue-demo
+$ cp deploy/termux/env.example ~/.config/pgqueue-demo/env    # then edit the password and port
+$ deploy/termux/start.sh                                     # try it by hand first
+```
+
+- **Start on boot**: copy `deploy/termux/boot/pgqueue-demo` to `~/.termux/boot/` (Termux:Boot);
+  it waits for PostgreSQL and restarts the demo if it exits.
+- **nginx**: include `nginx-zones.conf` in the `http` block and `nginx-location.conf` in the
+  `server` block. It publishes the dashboard under `/pgqueue/`, serves the static files from
+  disk, disables buffering for the event stream and limits connections per visitor.
+- **Public access**: put a Cloudflare Tunnel or Tailscale Funnel in front of nginx; the demo
+  itself only listens on `127.0.0.1`.
+- **Database**: the demo uses its own role and database and works with PostgreSQL 16 to 18
+  (the test suite passes on 18.6).
 
 ## Architecture
 
@@ -421,7 +498,7 @@ typed payloads and the failure semantics above are explicit and covered by tests
 - **Finished jobs stay in the table** until `pgqueue prune` removes them; with high volume,
   run it regularly and keep autovacuum healthy. Idempotency keys are only unique among rows
   that still exist.
-- **The admin counts jobs with a `GROUP BY` over the table**, fine for millions of rows,
+- **The admin counts jobs with a `GROUP BY` over the table** (the live view recomputes it once a second, shared by all viewers), fine for millions of rows,
   slow for hundreds of millions. Its auth is optional HTTP basic auth; put it behind your
   usual access controls.
 - **No workflows** (chains, groups, job dependencies), **no per-queue rate limits** and no
@@ -434,7 +511,7 @@ typed payloads and the failure semantics above are explicit and covered by tests
 ```console
 $ docker compose up -d postgres         # Postgres 17 on localhost:55432
 $ uv sync --all-extras
-$ uv run pytest                          # 143 tests against the real database, ~45 s
+$ uv run pytest                          # 160+ tests against the real database, ~45 s
 $ uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
@@ -443,8 +520,9 @@ to point them elsewhere and `PGQUEUE_STRESS_SEEDS=1,2,…` to run more stress sc
 runs lint, strict mypy and the full suite against Postgres 16 and 17, and builds the demo
 image.
 
-Project layout: `src/pgqueue` (library, CLI, admin), `tests`, `examples` (the demo),
-`bench` (benchmarks).
+Project layout: `src/pgqueue` (library, CLI, admin), `tests`, `examples` (the compose demo),
+`demo` (the public live demo: workload, workers, read-only server), `deploy/termux`
+(self-hosting scripts), `bench` (benchmarks).
 
 ## Changelog
 
