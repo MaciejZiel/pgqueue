@@ -208,6 +208,7 @@ def create_app(
     password: str | None = None,
     read_only: bool | None = None,
     banner: str | None = None,
+    public: bool | None = None,
 ) -> FastAPI:
     """Build the admin application.
 
@@ -218,11 +219,18 @@ def create_app(
     ``read_only`` (default: ``PGQUEUE_ADMIN_READ_ONLY``) leaves out every
     endpoint that changes state, so the dashboard can be shown to the public.
     ``banner`` is an optional line of text shown at the top of the dashboard.
+
+    ``public`` (default: ``PGQUEUE_ADMIN_PUBLIC``) is for an instance shown to anyone on
+    the internet: ``/metrics`` (worker ids, queue names, failure counts) and the API docs
+    (``/docs``, ``/redoc``, ``/openapi.json``) are not served at all. The dashboard and its
+    ``/api`` endpoints, which the page itself needs, stay.
     """
     username = username or os.environ.get("PGQUEUE_ADMIN_USERNAME")
     password = password or os.environ.get("PGQUEUE_ADMIN_PASSWORD")
     if read_only is None:
         read_only = os.environ.get("PGQUEUE_ADMIN_READ_ONLY", "").lower() in ("1", "true", "yes")
+    if public is None:
+        public = os.environ.get("PGQUEUE_ADMIN_PUBLIC", "").lower() in ("1", "true", "yes")
     engine = create_async_engine(sqlalchemy_url(dsn), pool_size=5, pool_pre_ping=True)
     feed = LiveFeed(engine, read_only=read_only)
 
@@ -232,7 +240,14 @@ def create_app(
         await feed.close()
         await engine.dispose()
 
-    app = FastAPI(title="pgqueue admin", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="pgqueue admin",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url=None if public else "/docs",
+        redoc_url=None if public else "/redoc",
+        openapi_url=None if public else "/openapi.json",
+    )
     app.state.engine = engine
     app.state.feed = feed
     app.state.credentials = (username, password) if username and password else None
@@ -258,16 +273,18 @@ def create_app(
             {"version": __version__, "read_only": read_only, "banner": banner},
         )
 
-    @app.get(
-        "/metrics",
-        include_in_schema=False,
-        dependencies=[Depends(_authenticate)],
-        response_class=PlainTextResponse,
-    )
-    async def metrics() -> PlainTextResponse:
-        async with engine.connect() as conn:
-            body = await render_metrics(conn)
-        return PlainTextResponse(body, media_type=CONTENT_TYPE_LATEST)
+    if not public:
+
+        @app.get(
+            "/metrics",
+            include_in_schema=False,
+            dependencies=[Depends(_authenticate)],
+            response_class=PlainTextResponse,
+        )
+        async def metrics() -> PlainTextResponse:
+            async with engine.connect() as conn:
+                body = await render_metrics(conn)
+            return PlainTextResponse(body, media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
