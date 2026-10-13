@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `demo/`: public live demo with a synthetic workload (bursts, failures, retries, cron,
   simulated worker crashes), bounded retention and a worker supervisor; Termux
   self-hosting scripts in `deploy/termux/`.
-- The test suite passes on PostgreSQL 18 (verified locally).
+- CI runs the test suite on PostgreSQL 16, 17 and 18.
 
 ### Fixed
 

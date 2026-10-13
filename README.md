@@ -224,8 +224,8 @@ $ python -m demo            # migrates, then serves http://127.0.0.1:8080
 
 ## Self-hosting on Termux
 
-The demo runs as plain processes (no Docker) on an Android phone with Termux, PostgreSQL 18
-and nginx. The scripts live in [`deploy/termux/`](deploy/termux). Roughly 270 MB of RAM for
+The demo runs as plain processes (no Docker) on a self-hosted server: here Termux on
+aarch64, with PostgreSQL 18 and nginx. The scripts live in [`deploy/termux/`](deploy/termux). Roughly 270 MB of RAM for
 the Python processes with the defaults (three workers).
 
 ```console
@@ -242,11 +242,13 @@ $ deploy/termux/start.sh                                     # try it by hand fi
   it waits for PostgreSQL and restarts the demo if it exits.
 - **nginx**: include `nginx-zones.conf` in the `http` block and `nginx-location.conf` in the
   `server` block. It publishes the dashboard under `/pgqueue/`, serves the static files from
-  disk, disables buffering for the event stream and limits connections per visitor.
+  disk, disables buffering for the event stream, limits requests and streams per visitor
+  (keyed on `CF-Connecting-IP` behind a Cloudflare Tunnel, where every request comes from
+  `127.0.0.1`) and caps the streams in total.
 - **Public access**: put a Cloudflare Tunnel or Tailscale Funnel in front of nginx; the demo
   itself only listens on `127.0.0.1`.
 - **Database**: the demo uses its own role and database and works with PostgreSQL 16 to 18
-  (the test suite passes on 18.6).
+  (CI runs the test suite on all three).
 
 ## Architecture
 
@@ -498,8 +500,10 @@ typed payloads and the failure semantics above are explicit and covered by tests
 - **Finished jobs stay in the table** until `pgqueue prune` removes them; with high volume,
   run it regularly and keep autovacuum healthy. Idempotency keys are only unique among rows
   that still exist.
-- **The admin counts jobs with a `GROUP BY` over the table** (the live view recomputes it once a second, shared by all viewers), fine for millions of rows,
-  slow for hundreds of millions. Its auth is optional HTTP basic auth; put it behind your
+- **The admin counts jobs with a `GROUP BY` over the table**. The live view, shared by all
+  viewers, counts active jobs every second but finished ones in full only once a minute
+  (about 10 ms per snapshot instead of 130 ms with a million finished jobs). Fine for
+  millions of rows, slow for hundreds of millions. Its auth is optional HTTP basic auth; put it behind your
   usual access controls.
 - **No workflows** (chains, groups, job dependencies), **no per-queue rate limits** and no
   result streaming; return values are stored as JSON on the job row.
@@ -517,7 +521,7 @@ $ uv run ruff check . && uv run ruff format --check . && uv run mypy
 
 Tests create their own databases (`pgqueue_test*`) on that server; set `PGQUEUE_TEST_DSN`
 to point them elsewhere and `PGQUEUE_STRESS_SEEDS=1,2,…` to run more stress scenarios. CI
-runs lint, strict mypy and the full suite against Postgres 16 and 17, and builds the demo
+runs lint, strict mypy and the full suite against Postgres 16, 17 and 18, and builds the demo
 image.
 
 Project layout: `src/pgqueue` (library, CLI, admin), `tests`, `examples` (the compose demo),

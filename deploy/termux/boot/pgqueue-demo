@@ -12,7 +12,7 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 
-# Restart if it ever exits; the loop is the only supervisor the phone needs.
+# Restart if it ever exits; this loop is the only supervisor needed.
 while true; do
   "$REPO/deploy/termux/start.sh" >>"$LOG" 2>&1
   sleep 5
