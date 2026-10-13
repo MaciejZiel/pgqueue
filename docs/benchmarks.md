@@ -1,13 +1,22 @@
 # Benchmarks
 
 What the numbers in the README come from, how to reproduce them, and how far to trust them.
-Short version: they were taken on a laptop that was busy with other work, the run-to-run
-spread is large, and the honest summary is a range, not a point.
+Short version: they were taken on a laptop that was busy with other work, in a fixed
+order (pgqueue first, then Celery), the run-to-run spread is large, and the honest summary
+is a range, not a point. The only claim that holds up across all runs is the one for 1 and
+2 worker processes; see [How to read this](#how-to-read-this).
 
-Run it yourself with `make bench` (about an hour with the defaults; `make bench-quick`
-checks the setup in a few minutes and produces meaningless numbers). Everything below is
-generated from [`bench/results.json`](../bench/results.json) by `python -m bench.report`
-and the charts by `python -m bench.chart`; no number in this file is typed in by hand.
+**The numbers below are the first run only**: order-fixed, on a loaded machine, schema 1 of
+`bench/results.json`. The benchmark script has since been changed to counterbalance the
+order and to record the load before and after each measurement (see
+[Method](#method-schema-2)), but it has not been rerun yet, so no number here comes from the
+new method.
+
+Run it yourself with `make bench` (about an hour with the defaults, plus the cool-down;
+`make bench-quick` checks the setup in a few minutes and produces meaningless numbers).
+The tables below are generated from [`bench/results.json`](../bench/results.json) by
+`python -m bench.report` and the charts by `python -m bench.chart`; the numbers in the
+prose are taken from the same file.
 
 ## Setup
 
@@ -16,13 +25,13 @@ and the charts by `python -m bench.chart`; no number in this file is typed in by
 | Machine | 13th Gen Intel Core i5-13500H, 16 logical CPUs, 14 GiB RAM, NVMe SSD, Linux 7.0 |
 | PostgreSQL | 17.11 (`postgres:17-alpine`) in Docker, default configuration: `shared_buffers = 128MB`, `synchronous_commit = on`, `fsync = on` |
 | Broker for the comparison | Valkey 8 (`valkey/valkey:8-alpine`, BSD-3-Clause fork of Redis; it reports itself as 7.2.4 for protocol compatibility), persistence off (`--save "" --appendonly no`) |
-| Celery | 5.6.3 with redis-py 8.1.0, thread pool, defaults otherwise (prefetch multiplier 4, no result backend, `ignore_result`) |
+| Celery | 5.6.3 with redis-py 8.1.0, thread pool with 32 threads per process, prefetch multiplier 4 (so up to 128 messages reserved per process), **early ack (`acks_late=False`)**, no result backend, `ignore_result`, defaults otherwise |
 | Python | 3.12.13 |
 | Topology | Postgres or Valkey, the workers and the load generator all run on the same machine, workers as separate OS processes |
 | Handler | no-op. This measures the queue, not your work |
 | Job payload | JSON object of about 2 KiB (identifiers, short strings and a free-text body, deterministic). A 256 B and a 16 KiB variant are in the payload table |
 | Concurrency | 32 job slots per worker process in both systems (asyncio tasks for pgqueue, threads for Celery) |
-| Repetitions | 5 runs of every cell, the two systems interleaved inside each run |
+| Repetitions | 5 runs of every cell; in this first run the systems always ran in the same order, pgqueue first and Celery a few seconds later (not counterbalanced) |
 
 Cells below are the **median over the 5 runs, with the minimum and maximum run in
 brackets**. Raw per-run numbers, the load average at each measurement and the environment
@@ -41,10 +50,24 @@ are in `bench/results.json`.
   not count. pgqueue reads `finished_at` from its job rows; the Celery task records its own
   finish time in Valkey.
 * **Pickup latency**: jobs arrive at a fixed 200 per second for 15 seconds (3,000 jobs)
-  into idle workers, and the latency is the time from enqueue to the first line of the
-  handler. pgqueue uses `started_at - created_at` (database clock, LISTEN/NOTIFY on, 1 s
-  polling as fallback); Celery compares `time.time()` in the producer and in the task, on
-  the same machine.
+  into idle workers. The two systems do not measure the same interval:
+  * pgqueue: `started_at - created_at`, both from the database clock. `created_at` is
+    set by the INSERT, before its fsynced commit, and `started_at` is set inside the claim
+    statement (`store.py`, `started_at = now()`), before the worker has received the row.
+    The interval therefore contains the insert's commit, the wake-up (LISTEN/NOTIFY, 1 s
+    polling as fallback) and the claim round trip, but not the transfer of the row to the
+    worker or the start of the handler.
+  * Celery: `time.time()` taken in the producer just before `apply_async` serialises the
+    message, compared with `time.time()` inside the handler. It contains serialisation,
+    the publish, the delivery to the worker and the thread hand-over, but no durable commit.
+
+  The two ratios in the pickup table are therefore not like-for-like and should not be read
+  as a pure speed comparison.
+* **Durability differs in the drain scenario too.** pgqueue commits the claim and the
+  completion of every job with an fsync. Celery runs with early ack (`acks_late=False`): the
+  message is acknowledged when the worker receives it, so a worker that dies mid-task loses
+  the task (at-most-once on receipt), and Valkey has persistence off. The backlog throughput
+  figures compare a durable at-least-once queue with a non-durable, at-most-once one.
 
 The Celery task makes one pipelined Redis call to record its timestamps, which pgqueue does
 not need because its job rows already hold them. Celery is charged that extra round trip.
