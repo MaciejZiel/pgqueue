@@ -33,6 +33,11 @@ admin = [
 pgqueue = "pgqueue.cli:main"
 
 [dependency-groups]
+# Only for the Celery comparison in `make bench`; not needed by the library or CI.
+bench = [
+    "celery>=5.6,<6",
+    "redis>=8.1,<9",
+]
 dev = [
     "pytest>=9.1,<10",
     "pytest-asyncio>=1.4,<2",
@@ -62,8 +67,9 @@ ignore = ["PLR0913", "PLR2004", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004", "S101"]
-# Benchmarks poll the database on purpose: that is what they measure.
-"bench/**" = ["ASYNC110"]
+# Benchmarks poll the database on purpose (that is what they measure) and import the
+# optional Celery group lazily so that pgqueue-only runs do not need it.
+"bench/**" = ["ASYNC110", "ASYNC109", "ASYNC240", "PLC0415"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -72,7 +78,7 @@ plugins = ["pydantic.mypy"]
 files = ["src", "tests", "examples", "bench", "demo"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg", "asyncpg.*", "prometheus_client", "prometheus_client.*"]
+module = ["asyncpg", "asyncpg.*", "prometheus_client", "prometheus_client.*", "celery", "celery.*", "redis", "redis.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
