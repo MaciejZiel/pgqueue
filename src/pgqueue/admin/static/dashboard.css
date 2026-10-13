@@ -402,7 +402,7 @@ pre.error { color: var(--failed); }
   .footer { padding: 8px 16px 24px; }
   .kpi .value { font-size: 24px; }
   .kpi.big .value { font-size: 38px; }
-  .kpi .value.small { font-size: 18px; }
+  .kpi .value.small { font-size: 16px; white-space: nowrap; }
   .chart { height: 160px; }
   .feed li { grid-template-columns: 70px minmax(0, 1fr); }
   .feed .when { display: none; }
