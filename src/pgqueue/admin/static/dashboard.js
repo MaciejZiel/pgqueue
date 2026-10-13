@@ -27,6 +27,7 @@
     const node = document.createElement(tag);
     for (const [key, value] of Object.entries(attrs)) {
       if (key === "class") node.className = value;
+      else if (key === "style") Object.assign(node.style, value); // CSSOM, not a style attribute (CSP)
       else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
       else if (value !== null && value !== undefined) node.setAttribute(key, value);
     }
@@ -244,7 +245,7 @@
           el("span", {}, `failed ${fmt.format(w.failed)}`),
           el("span", {}, w.queues.join(", "))),
         el("div", { class: "busy" },
-          el("div", { class: "track" }, el("div", { class: "fill", style: `width:${pct}%` })),
+          el("div", { class: "track" }, el("div", { class: "fill", style: { width: `${pct}%` } })),
           el("span", { class: "label" }, `${w.in_flight}/${w.concurrency} slots`)));
     });
     $("workers").replaceChildren(...(cards.length ? cards : [el("p", { class: "empty" }, "No workers running")]));
@@ -266,7 +267,7 @@
         el("td", { class: "num" }, seconds((now - new Date(job.started_at)) / 1000)),
         el("td", {},
           el("div", { class: "busy" },
-            el("div", { class: "track" }, el("div", { class: `fill lease ${pct < 35 ? "low" : ""}`, style: `width:${pct}%` })),
+            el("div", { class: "track" }, el("div", { class: `fill lease ${pct < 35 ? "low" : ""}`, style: { width: `${pct}%` } })),
             el("span", { class: "label" }, left > 0 ? `${left.toFixed(0)}s` : "expired"))));
     });
     replaceRows($("leases"), rows, 7, "Nothing is running right now");
