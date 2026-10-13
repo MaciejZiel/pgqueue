@@ -446,6 +446,10 @@ image.
 Project layout: `src/pgqueue` (library, CLI, admin), `tests`, `examples` (the demo),
 `bench` (benchmarks).
 
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Maciej Zieliński. Third-party components and their licenses are
