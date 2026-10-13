@@ -99,26 +99,27 @@ class LiveFeed:
         self._subscribers += 1
         if self._producer is None or self._producer.done():
             self._producer = asyncio.create_task(self._produce())
-        seen = 0
+        # A new viewer gets a still-fresh snapshot straight away instead of after a tick.
+        fresh = time.monotonic() - self._computed_at < self._interval
+        seen = self._version - 1 if self._latest is not None and fresh else self._version
 
-        def newer(last: int | None = None) -> bool:
-            return self._version > (seen if last is None else last)
+        def newer() -> bool:
+            return self._version > seen
 
         try:
             while True:
+                payload: bytes | None = None
                 async with self._changed:
                     try:
-                        await asyncio.wait_for(
-                            self._changed.wait_for(newer),
-                            KEEPALIVE_SECONDS,
-                        )
+                        await asyncio.wait_for(self._changed.wait_for(newer), KEEPALIVE_SECONDS)
                     except TimeoutError:
-                        yield None
-                        continue
-                    seen = self._version
-                    payload = self._latest
-                if payload is not None:
-                    yield payload
+                        pass  # nothing new: send a keep-alive
+                    else:
+                        seen = self._version
+                        payload = self._latest
+                # Yield with the lock released: the consumer may block on a slow client, and
+                # holding the lock meanwhile would stall the producer and every other viewer.
+                yield payload
         finally:
             self._subscribers -= 1
             if self._subscribers == 0 and self._producer is not None:
