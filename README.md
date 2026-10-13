@@ -124,6 +124,9 @@ $ export PGQUEUE_DSN=postgresql://user:pass@localhost/app
 $ pgqueue migrate
 ```
 
+pgqueue is not published on PyPI: the `pgqueue` name there belongs to an unrelated
+project, so install from this repository as shown above.
+
 Define tasks in a module, e.g. `app/jobs.py`:
 
 ```python
@@ -197,7 +200,7 @@ Updates arrive over server-sent events (`/api/stream`) with a polling fallback
 load does not depend on how many people are watching (100 concurrent streams cost the demo
 process about 90 MB and under 3 % CPU on a laptop).
 
-<img src="docs/dashboard-mobile.png" alt="The dashboard on a phone" width="260">
+<img src="docs/dashboard-mobile.png" alt="The dashboard on a narrow mobile screen" width="260">
 
 The workload ([`demo/`](demo), separate from the library) is deliberately lively:
 
@@ -515,7 +518,7 @@ typed payloads and the failure semantics above are explicit and covered by tests
 ```console
 $ docker compose up -d postgres         # Postgres 17 on localhost:55432
 $ uv sync --all-extras
-$ uv run pytest                          # 160+ tests against the real database, ~45 s
+$ uv run pytest                          # 173 tests against the real database, ~80 s
 $ uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
