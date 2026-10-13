@@ -49,6 +49,7 @@ class LiveFeed:
         self._producer: asyncio.Task[None] | None = None
         self._subscribers = 0
         self._compute_lock = asyncio.Lock()
+        self._finished = queries.FinishedCounts()
 
     @property
     def max_subscribers(self) -> int:
@@ -60,7 +61,9 @@ class LiveFeed:
 
     async def _compute(self) -> bytes:
         async with self._engine.connect() as conn:
-            snapshot = await queries.snapshot(conn, read_only=self._read_only)
+            snapshot = await queries.snapshot(
+                conn, read_only=self._read_only, finished=self._finished
+            )
         return snapshot.model_dump_json().encode()
 
     async def current(self) -> bytes:

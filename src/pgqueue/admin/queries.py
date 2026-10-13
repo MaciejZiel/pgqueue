@@ -6,10 +6,11 @@ optional filters, which is exactly what a query builder is good at.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 
-from sqlalchemy import ColumnElement, and_, case, func, select, text, update
+from sqlalchemy import ColumnElement, and_, case, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from pgqueue.admin.schemas import (
@@ -27,7 +28,14 @@ from pgqueue.admin.schemas import (
     ThroughputSecond,
     WorkerOut,
 )
-from pgqueue.schema import READY_STATUSES, JobStatus, jobs, periodic, workers
+from pgqueue.schema import (
+    READY_STATUSES,
+    TERMINAL_STATUSES,
+    JobStatus,
+    jobs,
+    periodic,
+    workers,
+)
 
 REQUEUEABLE = (JobStatus.FAILED, JobStatus.DEAD, JobStatus.RETRYING)
 FAILURE_STATUSES = (JobStatus.FAILED, JobStatus.DEAD)
@@ -47,14 +55,79 @@ async def overview(conn: AsyncConnection, *, minutes: int = 60) -> Overview:
     )
 
 
-async def _queue_stats(
-    conn: AsyncConnection, now: datetime
-) -> tuple[list[QueueStats], dict[JobStatus, int]]:
-    counts: dict[str, dict[JobStatus, int]] = {}
+ACTIVE_STATUSES = tuple(s for s in JobStatus if s not in TERMINAL_STATUSES)
+
+Counts = dict[str, dict[JobStatus, int]]
+
+
+async def _count(conn: AsyncConnection, *conditions: ColumnElement[bool]) -> Counts:
+    counts: Counts = {}
     for queue, status, n in await conn.execute(
-        select(jobs.c.queue, jobs.c.status, func.count()).group_by(jobs.c.queue, jobs.c.status)
+        select(jobs.c.queue, jobs.c.status, func.count())
+        .where(and_(True, *conditions))
+        .group_by(jobs.c.queue, jobs.c.status)
     ):
-        counts.setdefault(queue, dict.fromkeys(JobStatus, 0))[JobStatus(status)] = n
+        counts.setdefault(queue, dict.fromkeys(JobStatus, 0))[JobStatus(status)] += n
+    return counts
+
+
+def _merge(*parts: Counts) -> Counts:
+    merged: Counts = {}
+    for part in parts:
+        for queue, by_status in part.items():
+            target = merged.setdefault(queue, dict.fromkeys(JobStatus, 0))
+            for status, n in by_status.items():
+                target[status] += n
+    return merged
+
+
+_COMMIT_SLACK = timedelta(seconds=5)
+
+
+class FinishedCounts:
+    """Counts of finished jobs that do not rescan the whole table every second.
+
+    Finished jobs are almost all of the table, so counting them is a sequential
+    scan (about 100 ms for a million rows). The live view counts them in full
+    only every ``max_age`` seconds and in between adds the jobs that finished
+    since, which the ``(status, finished_at)`` index finds cheaply. Deleted or
+    requeued finished jobs show up at the next full count.
+    """
+
+    def __init__(self, max_age: float = 60.0) -> None:
+        self.max_age = max_age
+        self._base: Counts = {}
+        self._cutoff: datetime | None = None
+        self._counted_at = 0.0
+
+    async def get(self, conn: AsyncConnection) -> Counts:
+        if self._cutoff is None or time.monotonic() - self._counted_at >= self.max_age:
+            # A few seconds of overlap, so a job whose transaction committed just after the
+            # full count (with a finished_at from before it) is still picked up below.
+            cutoff = (await conn.execute(select(func.now()))).scalar_one() - _COMMIT_SLACK
+            self._base = await _count(
+                conn,
+                jobs.c.status.in_(TERMINAL_STATUSES),
+                or_(jobs.c.finished_at < cutoff, jobs.c.finished_at.is_(None)),
+            )
+            self._cutoff = cutoff
+            self._counted_at = time.monotonic()
+        recent = await _count(
+            conn, jobs.c.status.in_(TERMINAL_STATUSES), jobs.c.finished_at >= self._cutoff
+        )
+        return _merge(self._base, recent)
+
+
+async def _queue_stats(
+    conn: AsyncConnection, now: datetime, finished: FinishedCounts | None = None
+) -> tuple[list[QueueStats], dict[JobStatus, int]]:
+    if finished is None:
+        counts = await _count(conn)
+    else:
+        # Active jobs are few and found through the (status, finished_at) index.
+        counts = _merge(
+            await _count(conn, jobs.c.status.in_(ACTIVE_STATUSES)), await finished.get(conn)
+        )
     lag: dict[str, float] = {}
     for queue, oldest in await conn.execute(
         select(jobs.c.queue, func.min(jobs.c.run_at))
@@ -247,7 +320,7 @@ async def live_stats(conn: AsyncConnection, *, now: datetime, window: int = 120)
 
 
 async def running_jobs(conn: AsyncConnection, *, limit: int = 40) -> list[RunningJob]:
-    """Jobs currently holding a lease, soonest-to-expire first."""
+    """Jobs currently holding a lease, most recently started first."""
     rows = await conn.execute(
         select(
             jobs.c.id,
@@ -312,9 +385,13 @@ async def recent_activity(
     return items
 
 
-async def snapshot(conn: AsyncConnection, *, read_only: bool) -> Snapshot:
+async def snapshot(
+    conn: AsyncConnection, *, read_only: bool, finished: FinishedCounts | None = None
+) -> Snapshot:
+    """Everything the live dashboard shows. Pass a long-lived ``finished`` to avoid
+    recounting every finished job on each call."""
     now: datetime = (await conn.execute(select(func.now()))).scalar_one()
-    queues, totals = await _queue_stats(conn, now)
+    queues, totals = await _queue_stats(conn, now, finished)
     return Snapshot(
         now=now,
         read_only=read_only,
