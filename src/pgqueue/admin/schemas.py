@@ -51,8 +51,9 @@ class ThroughputPoint(BaseModel):
 
 class WorkerOut(BaseModel):
     id: str
-    hostname: str
-    pid: int
+    hostname: str | None
+    """``None`` on the public dashboard, which shows a stable label as ``id`` instead."""
+    pid: int | None
     queues: list[str]
     concurrency: int
     lease_seconds: float
