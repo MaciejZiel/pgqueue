@@ -243,6 +243,22 @@ The public dashboard exposes **no endpoint that changes state**: in read-only mo
 mounted at all, and the buttons are not rendered. Settings are environment variables, listed in
 [`deploy/termux/env.example`](deploy/termux/env.example).
 
+**What a visitor can and cannot do.** The demo has no input path for code or URLs. Every job
+is built by the demo's own generator from fixed task types and numbers, and the "webhook"
+tasks only sleep and fail on a schedule: nothing makes an outgoing request. The public app
+accepts GET requests only (the dashboard page, static files and the read-only `/api/*` JSON
+and event stream); the only parameters are a job status and a row limit on `/api/jobs`,
+validated and passed to SQL as bind values. In addition the demo runs in **public mode**
+(`create_app(dsn, public=True)` or `PGQUEUE_ADMIN_PUBLIC=1`), which leaves out `/metrics`
+(worker ids, queue names, failure counts) and the API docs (`/docs`, `/redoc`,
+`/openapi.json`) entirely; nginx answers 404 for the same paths as well.
+
+**Retention.** The tables cannot grow without bound: a janitor every 20 s deletes finished
+jobs older than 10 minutes and anything beyond the newest 6000 finished rows, and forgets
+dead workers after 30 s. Live jobs are limited by the generator's backpressure (it pauses
+above 1500 waiting jobs), and `pgqueue_periodic` holds two rows. Tune with
+`DEMO_RETENTION_SECONDS`, `DEMO_MAX_FINISHED` and `DEMO_MAX_BACKLOG`.
+
 ```console
 $ export PGQUEUE_DSN=postgresql://user:pass@127.0.0.1/pgqueue_demo
 $ python -m demo            # migrates, then serves http://127.0.0.1:8080
@@ -271,6 +287,18 @@ $ deploy/termux/start.sh                                     # try it by hand fi
   disk, disables buffering for the event stream, limits requests and streams per visitor
   (keyed on `CF-Connecting-IP` behind a Cloudflare Tunnel, where every request comes from
   `127.0.0.1`) and caps the streams in total.
+- **Security headers**: `nginx-location.conf` includes `nginx-headers.conf` in every location
+  (nginx drops inherited `add_header` lines once a location sets its own). It sends a
+  Content-Security-Policy with everything restricted to `'self'` (no inline script or style: the
+  dashboard builds its styles through the DOM, and the event stream is a same-origin
+  `EventSource`), `nosniff`, `frame-ancestors 'none'` with `X-Frame-Options: DENY`,
+  `Referrer-Policy` and `Permissions-Policy`. `tests/test_deploy.py` checks the dashboard
+  against the policy.
+- **Updating an existing deployment**: pull, restart the demo (so `PGQUEUE_ADMIN_PUBLIC` takes
+  effect), replace the server's copy of `nginx-location.conf` with the new one (it now
+  includes `nginx-headers.conf`, which must exist at the path in the `include` lines, by
+  default `~/pgqueue/deploy/termux/nginx-headers.conf`), then `nginx -t && nginx -s reload`.
+  Nothing else changes: `nginx-zones.conf` and `~/.config/pgqueue-demo/env` stay as they are.
 - **Public access**: put a Cloudflare Tunnel or Tailscale Funnel in front of nginx; the demo
   itself only listens on `127.0.0.1`.
 - **Database**: the demo uses its own role and database and works with PostgreSQL 16 to 18
