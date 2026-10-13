@@ -252,7 +252,9 @@ class Worker:
         if not jobs:
             return
         held = await self.app.store.heartbeat(list(jobs), self.id, lease_seconds=self.lease_seconds)
-        for job_id in jobs.keys() - held:
+        still_running = {job.id for job in self._running.values()}
+        # A job that finished while the heartbeat was in flight is not a lost lease.
+        for job_id in (jobs.keys() - held) & still_running:
             log.warning(
                 "lost the lease on job %d (%s); its outcome will be discarded",
                 job_id,

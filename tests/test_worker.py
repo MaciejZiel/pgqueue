@@ -286,3 +286,54 @@ async def test_forced_stop_does_not_wait_for_the_shutdown_timeout(app: PgQueue) 
 
     assert time.monotonic() - started < 5  # instead of the 60 s shutdown timeout
     assert await count(app, "queued") == 1
+
+
+async def test_heartbeat_does_not_warn_about_jobs_that_finished_meanwhile(
+    app: PgQueue, caplog: pytest.LogCaptureFixture
+) -> None:
+    @app.task()
+    async def slow(payload: Item) -> None:
+        await asyncio.sleep(10)
+
+    await slow.enqueue(Item(n=1))
+    worker = make_worker(app)
+    [job] = await app.store.claim(["default"], limit=1, worker_id=worker.id, lease_seconds=30)
+    task = asyncio.create_task(asyncio.sleep(10))
+    worker._running[task] = job
+    original = app.store.heartbeat
+
+    async def finishing(*args: object, **kwargs: object) -> set[int]:
+        worker._running.clear()  # the job completes while the heartbeat is in flight
+        return await original(*args, **kwargs)  # type: ignore[arg-type]
+
+    app.store.heartbeat = finishing  # type: ignore[method-assign]
+    await app.store.register_worker(worker.id, queues=["default"], concurrency=4, lease_seconds=30)
+    await app.store.fail(job, worker.id, status=JobStatus.RETRYING, error="x")  # lease is gone
+
+    with caplog.at_level("WARNING", logger="pgqueue.worker"):
+        await worker._heartbeat()
+    task.cancel()
+
+    assert "lost the lease" not in caplog.text
+
+
+async def test_heartbeat_still_warns_when_a_running_job_lost_its_lease(
+    app: PgQueue, caplog: pytest.LogCaptureFixture
+) -> None:
+    @app.task()
+    async def slow(payload: Item) -> None:
+        await asyncio.sleep(10)
+
+    await slow.enqueue(Item(n=1))
+    worker = make_worker(app)
+    [job] = await app.store.claim(["default"], limit=1, worker_id=worker.id, lease_seconds=30)
+    task = asyncio.create_task(asyncio.sleep(10))
+    worker._running[task] = job
+    await app.store.register_worker(worker.id, queues=["default"], concurrency=4, lease_seconds=30)
+    await app.store.fail(job, worker.id, status=JobStatus.RETRYING, error="x")  # reaped elsewhere
+
+    with caplog.at_level("WARNING", logger="pgqueue.worker"):
+        await worker._heartbeat()
+    task.cancel()
+
+    assert f"lost the lease on job {job.id}" in caplog.text
