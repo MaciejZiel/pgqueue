@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Workers no longer log "lost the lease" for a job that finished while its heartbeat was
   in flight.
+- The live dashboard no longer counts every finished job each second, and one stalled
+  viewer can no longer hold up the stream for the others.
+- Demo retention never deletes a finished job that is being requeued.
 
 ## [0.1.0] - 2026-10-13
 
