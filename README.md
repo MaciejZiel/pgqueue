@@ -18,7 +18,7 @@ with backoff, a dead-letter state, scheduled and cron jobs, crash recovery throu
 LISTEN/NOTIFY wake-ups, a dashboard and Prometheus metrics, and it lets you enqueue a job
 **in the same transaction** as the data it refers to.
 
-![The live dashboard, recorded against the demo workload](docs/dashboard-live.gif)
+[![The pgqueue dashboard at desktop width, showing throughput, latency and queue depth for the demo workload](docs/dashboard.png)](https://pgqueue.maciejzielinski.dev)
 
 ```python
 from pydantic import BaseModel
