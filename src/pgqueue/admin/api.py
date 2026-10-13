@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -234,6 +240,15 @@ def create_app(
     if not read_only:
         app.include_router(actions)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        # Browsers request this on their own, without credentials and before reading the page.
+        return FileResponse(
+            HERE / "static" / "favicon.ico",
+            media_type="image/x-icon",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @app.get("/", include_in_schema=False, dependencies=[Depends(_authenticate)])
     async def dashboard(request: Request) -> HTMLResponse:

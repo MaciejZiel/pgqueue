@@ -157,3 +157,20 @@ async def test_dashboard_page_and_assets_are_served(client: Client) -> None:
     script = await client.get("/static/dashboard.js")
     assert script.status == 200
     assert "X-PgQueue-Action" in script.text  # the dashboard sends the CSRF header
+
+
+async def test_icons_are_served_with_image_types(client: Client) -> None:
+    page = await client.get("/")
+    for name in ("favicon.ico", "favicon.svg", "favicon-32x32.png", "apple-touch-icon.png"):
+        assert f"static/{name}" in page.text
+    for path, ctype in (
+        ("/favicon.ico", "image/x-icon"),
+        ("/static/favicon.svg", "image/svg+xml"),
+        ("/static/favicon-32x32.png", "image/png"),
+        ("/static/apple-touch-icon.png", "image/png"),
+    ):
+        icon = await client.get(path)
+        assert icon.status == 200, path
+        assert icon.headers["content-type"].split(";")[0] == ctype
+        assert icon.body
+    assert (await client.get("/favicon.ico")).headers["cache-control"] == "public, max-age=86400"

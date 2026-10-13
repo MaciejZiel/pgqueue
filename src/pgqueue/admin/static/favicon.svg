@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="pgqueue">
+  <rect width="64" height="64" rx="15" fill="#0b1020"/>
+  <rect x="12" y="13" width="40" height="10" rx="5" fill="#6aa1ff"/>
+  <rect x="12" y="27" width="31" height="10" rx="5" fill="#6aa1ff"/>
+  <rect x="12" y="41" width="22" height="10" rx="5" fill="#6aa1ff"/>
+</svg>

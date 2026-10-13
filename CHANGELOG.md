@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Dashboard favicon set (SVG, ICO, 32 px PNG, Apple touch icon) and `theme-color` tags; the admin app
+  answers `/favicon.ico`.
 - Dashboard rebuilt: live updates over server-sent events (polling fallback), throughput
   per second, pickup and run latency percentiles, queue depth history, workers with
   heartbeats and leases, running jobs with lease countdowns, a live job feed and a
