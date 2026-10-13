@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `make bench`: a reproducible benchmark with a 1/2/4/8 worker sweep, enqueue and pickup latency
+  percentiles, payload sizes, repeated runs and a Celery + Valkey comparison; results, charts
+  and caveats in `docs/benchmarks.md`. It replaces the earlier single-run numbers.
 - Dashboard favicon set (SVG, ICO, 32 px PNG, Apple touch icon) and `theme-color` tags; the admin app
   answers `/favicon.ico`.
 - Dashboard rebuilt: live updates over server-sent events (polling fallback), throughput
