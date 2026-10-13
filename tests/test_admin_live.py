@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from starlette.routing import Mount
 
 from pgqueue import JobStatus, PgQueue
 from pgqueue.admin import create_app, live, queries
@@ -252,3 +254,31 @@ async def test_a_stalled_viewer_does_not_block_the_others(
         await other.aclose()
         await stalled.aclose()
 
+
+async def test_read_only_app_exposes_only_safe_methods(read_only: FastAPI) -> None:
+    """Enumerate every route, including those of included routers and the OpenAPI schema."""
+    methods: dict[str, set[str]] = {}
+    for path, operations in read_only.openapi()["paths"].items():
+        methods.setdefault(path, set()).update(m.upper() for m in operations)
+
+    def walk(routes: list[Any]) -> None:
+        for route in routes:
+            if isinstance(route, Mount):
+                methods.setdefault(f"{route.path}/dashboard.css", set()).add("GET")  # static files
+            elif hasattr(route, "methods") and hasattr(route, "path"):
+                methods.setdefault(route.path, set()).update(route.methods or ())
+            if hasattr(route, "routes") and not isinstance(route, Mount):
+                walk(list(route.routes))
+
+    walk(list(read_only.routes))
+    unsafe = {path: m - {"GET", "HEAD"} for path, m in methods.items() if m - {"GET", "HEAD"}}
+    assert unsafe == {}
+    assert "/api/jobs/{job_id}/requeue" not in methods
+    assert "/api/queues/{queue}/requeue" not in methods
+
+    client = Client(read_only)
+    for path in sorted(methods):
+        concrete = path.replace("{job_id}", "1").replace("{queue}", "default")
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            response = await client.request(method, concrete, headers=ACTION)
+            assert response.status in (404, 405), (method, concrete, response.status)
