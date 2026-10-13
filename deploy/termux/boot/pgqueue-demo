@@ -12,8 +12,11 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 
-# Restart if it ever exits; this loop is the only supervisor needed.
+# Restart if it ever exits; this loop is the only supervisor needed. The output goes through
+# logcap.sh, which rotates the file at PGQUEUE_LOG_MAX_BYTES (default 1 MiB) and keeps
+# PGQUEUE_LOG_KEEP old files (default 2), so the log can never grow without bound.
 while true; do
-  "$REPO/deploy/termux/start.sh" >>"$LOG" 2>&1
+  "$REPO/deploy/termux/start.sh" 2>&1 |
+    "$REPO/deploy/termux/logcap.sh" "$LOG" "${PGQUEUE_LOG_MAX_BYTES:-1048576}" "${PGQUEUE_LOG_KEEP:-2}"
   sleep 5
 done
