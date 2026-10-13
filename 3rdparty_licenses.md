@@ -27,16 +27,34 @@ license is listed separately below.
 | https://hub.docker.com/_/postgres | postgres (container image) | PostgreSQL | https://www.postgresql.org/about/licence/ |
 | https://hub.docker.com/_/python | python (container image, demo only) | PSF-2.0 | https://docs.python.org/3/license.html |
 | https://github.com/astral-sh/uv | uv (container image, build stage of the demo) | MIT OR Apache-2.0 | https://github.com/astral-sh/uv/blob/main/LICENSE-MIT |
+| https://pypi.org/project/celery/ | celery (benchmark comparison only, `bench` group) | BSD-3-Clause | https://github.com/celery/celery/blob/main/LICENSE |
+| https://pypi.org/project/redis/ | redis-py (benchmark comparison only, `bench` group) | MIT | https://github.com/redis/redis-py/blob/master/LICENSE |
+| https://hub.docker.com/r/valkey/valkey | valkey (container image, benchmark comparison only) | BSD-3-Clause | https://github.com/valkey-io/valkey/blob/unstable/COPYING |
 
 ## Development-only transitive dependencies
 
-These are installed only by `uv sync --all-extras` for local development and CI. They are
-not runtime dependencies, are not imported by pgqueue and are not distributed with it
-(neither in the package nor in the demo image).
+The `pathspec` row is installed only by `uv sync --all-extras` for local development and
+CI. The rest belong to the optional `bench` dependency group (`uv sync --group bench`),
+which only `make bench` uses for the Celery comparison. None of them are runtime
+dependencies, none are imported by pgqueue and none are distributed with it (neither in
+the package nor in the demo image).
 
 | source | name | license type | license link |
 |---|---|---|---|
 | https://pypi.org/project/pathspec/ | pathspec 1.1.1 (transitive, via mypy; dev/CI only, not distributed) | MPL-2.0 | https://github.com/cpburnz/python-pathspec/blob/master/LICENSE |
+| https://pypi.org/project/kombu/ | kombu (transitive, via celery; benchmark only) | BSD-3-Clause | https://github.com/celery/kombu/blob/main/LICENSE |
+| https://pypi.org/project/amqp/ | amqp (transitive, via kombu; benchmark only) | BSD-3-Clause | https://github.com/celery/py-amqp/blob/main/LICENSE |
+| https://pypi.org/project/billiard/ | billiard (transitive, via celery; benchmark only) | BSD-3-Clause | https://github.com/celery/billiard/blob/main/LICENSE.txt |
+| https://pypi.org/project/vine/ | vine (transitive, via celery; benchmark only) | BSD-3-Clause | https://github.com/celery/vine/blob/main/LICENSE |
+| https://pypi.org/project/click-didyoumean/ | click-didyoumean (transitive, via celery; benchmark only) | MIT | https://github.com/click-contrib/click-didyoumean/blob/master/LICENSE |
+| https://pypi.org/project/click-plugins/ | click-plugins (transitive, via celery; benchmark only) | BSD-3-Clause | https://github.com/click-contrib/click-plugins/blob/master/LICENSE.txt |
+| https://pypi.org/project/click-repl/ | click-repl (transitive, via celery; benchmark only) | MIT | https://github.com/click-contrib/click-repl/blob/main/LICENSE |
+| https://pypi.org/project/prompt-toolkit/ | prompt-toolkit (transitive, via click-repl; benchmark only) | BSD-3-Clause | https://github.com/prompt-toolkit/python-prompt-toolkit/blob/main/LICENSE |
+| https://pypi.org/project/wcwidth/ | wcwidth (transitive, via prompt-toolkit; benchmark only) | MIT | https://github.com/jquast/wcwidth/blob/master/LICENSE |
+| https://pypi.org/project/python-dateutil/ | python-dateutil (transitive, via celery; benchmark only) | Apache-2.0 AND BSD-3-Clause | https://github.com/dateutil/dateutil/blob/master/LICENSE |
+| https://pypi.org/project/six/ | six (transitive, via python-dateutil; benchmark only) | MIT | https://github.com/benjaminp/six/blob/main/LICENSE |
+| https://pypi.org/project/tzlocal/ | tzlocal (transitive, via celery; benchmark only) | MIT | https://github.com/regebro/tzlocal/blob/master/LICENSE.txt |
+| https://pypi.org/project/tzdata/ | tzdata (transitive, via celery and kombu; benchmark only) | Apache-2.0 | https://github.com/python/tzdata/blob/master/LICENSE |
 
 ## Notes
 

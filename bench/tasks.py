@@ -1,4 +1,4 @@
-"""Benchmark tasks: a no-op handler, so we measure the queue, not the work."""
+"""pgqueue benchmark task: a no-op handler, so we measure the queue, not the work."""
 
 from __future__ import annotations
 
@@ -14,10 +14,14 @@ app = PgQueue(
 )
 
 
-class Noop(BaseModel):
+class Email(BaseModel):
     n: int
+    kind: str
+    recipient: str
+    subject: str
+    body: str
 
 
 @app.task(name="bench.noop", queue="bench")
-async def noop(payload: Noop) -> None:
+async def noop(payload: Email) -> None:
     return None

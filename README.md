@@ -400,49 +400,51 @@ What happens when…
 
 ## Benchmarks
 
-Measured with [`bench/bench.py`](bench/bench.py) on the author's laptop, so read them as an
-order of magnitude, not a promise:
+`make bench` runs a reproducible benchmark against a real PostgreSQL and, next to it,
+Celery on Valkey (the BSD-licensed Redis fork) with the same no-op handler, the same
+2 KiB JSON payload and 32 job slots per worker process. Workers are separate processes
+started through the real CLI. Each cell is repeated 5 times. The full method, every table,
+the SKIP LOCKED explanation and the caveats are in [`docs/benchmarks.md`](docs/benchmarks.md);
+raw per-run numbers are in [`bench/results.json`](bench/results.json).
 
-- **CPU** 13th Gen Intel Core i5-13500H (12 cores / 16 threads), **RAM** 14 GiB, NVMe SSD
-- PostgreSQL 17.11 in Docker with the **default configuration** (`shared_buffers = 128MB`,
-  `synchronous_commit = on`) on the same machine as the workers and the load generator
-- Python 3.12.13, Linux 7.0; the machine was not idle (load average ≈ 5 from other
-  processes during the run)
-- Workers are separate processes started through the real CLI; the handler is a no-op, so
-  this measures the queue's own overhead (claim, lease, completion), not your work
+Read the numbers with these caveats first: one 13th Gen Intel i5-13500H laptop (16 threads,
+14 GiB RAM) running Postgres 17 with default settings, Valkey, the workers and the load
+generator together, **and busy with unrelated work during the runs** (1-minute load average
+between 2 and 38). Run-to-run spread is large, so cells are the median with the minimum and
+maximum run in brackets.
 
-| Scenario | Jobs | Time | Throughput |
-|---|---:|---:|---:|
-| `enqueue()`, one client, one job per transaction | 5,000 | 10.2 s | **490 jobs/s** |
-| `enqueue()`, 10 concurrent clients | 20,000 | 13.9 s | **1,438 jobs/s** |
-| `enqueue_many()`, batches of 1,000 | 100,000 | 2.5 s | **40,496 jobs/s** |
-| drain a 50k backlog, 1 worker × 32 slots | 50,000 | 34.8 s | **1,436 jobs/s** |
-| drain a 50k backlog, 2 workers × 32 slots | 50,000 | 19.0 s | **2,628 jobs/s** |
-| drain a 50k backlog, 4 workers × 32 slots | 50,000 | 12.0 s | **4,185 jobs/s** |
-| drain a 50k backlog, 8 workers × 32 slots | 50,000 | 7.6 s | **6,625 jobs/s** |
+| Backlog of 20,000 jobs, jobs/s | pgqueue | Celery + Valkey |
+|---:|---:|---:|
+| 1 worker process | 825 (725-1,399) | 349 (280-499) |
+| 2 worker processes | 1,702 (1,427-2,528) | 722 (574-1,268) |
+| 4 worker processes | 3,915 (2,444-5,475) | 1,765 (990-3,354) |
+| 8 worker processes | 4,161 (2,589-8,142) | 3,422 (1,683-6,747) |
 
-Pickup latency (enqueue → handler starts) for a steady 100 jobs/s into idle workers:
+![Backlog throughput by number of worker processes](docs/benchmarks-throughput.svg)
 
-| Wake-up mechanism | p50 | p95 | p99 |
-|---|---:|---:|---:|
-| LISTEN/NOTIFY (+ 1 s polling fallback) | **4.1 ms** | 6.7 ms | 12.5 ms |
-| polling only, 1 s interval | 483 ms | 932 ms | 991 ms |
+What this does and does not show:
 
-Observations:
-
-- Single-job enqueue is bound by commit latency (an fsync per transaction). Batching with
-  `enqueue_many` is ~80× faster; enqueueing inside a transaction you are committing anyway
-  costs nothing extra.
-- Throughput scales nearly linearly up to 4 worker processes and keeps growing at 8; the
-  ceiling on this machine is Postgres's per-row UPDATE + commit cost (two transactions per
-  job: claim and completion).
+- Within each run the two systems were measured seconds apart under the same load, and
+  pgqueue was faster in every run at 1, 2 and 4 workers and in 4 of 5 runs at 8 workers.
+  The absolute numbers moved by a factor of two to three with how busy the machine was.
+- Enqueue is where Postgres pays for durability: a single `enqueue()` call (one fsynced
+  commit) took a median of 4.4 ms at 184 jobs/s for one client, against 1.7 ms and 566
+  jobs/s for a Celery publish to a Valkey without persistence. `enqueue_many` inserted
+  1,000 jobs per call at 6,188 jobs/s (median; range 5,181 to 14,792).
+- Pickup latency (enqueue to handler start, 200 jobs/s into idle workers) had a p50 of
+  4.5 to 7.3 ms for pgqueue and 3.5 to 4.5 ms for Celery depending on the worker count;
+  pgqueue's p99 was 15 to 38 ms, Celery's 6 to 11 ms.
+- Not measured: a real handler workload, other Celery pools (prefork, gevent), RQ, separate
+  database and worker hosts, tuned Postgres, Valkey with persistence, tables of millions
+  of rows.
 - The benchmark caught a real bug: the first version of the claim query filtered with
   `queue = ANY($1)`, which cannot use the index for ordering, and degraded to a
   sequential scan + sort of the whole backlog (22 ms per claim at 50k jobs). Walking the
   index per queue through a `LATERAL` subquery brought that to ~0.1 ms and doubled
-  throughput. Raw numbers are in [`bench/results.json`](bench/results.json).
+  throughput.
 
-Reproduce: `docker compose up -d postgres && uv run python -m bench.bench`.
+Reproduce: `make bench` (needs Docker and uv; about an hour), then `make bench-chart` to
+redraw the charts. `make bench-quick` checks the setup in a few minutes.
 
 ## Design decisions and trade-offs
 
