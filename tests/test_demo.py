@@ -239,6 +239,30 @@ async def test_the_table_stays_bounded_under_a_sustained_load(demo_app: PgQueue)
         assert await pool.fetchval("SELECT count(*) FROM pgqueue_jobs") <= 700
 
 
+async def test_the_cap_never_deletes_a_job_that_is_being_requeued(demo_app: PgQueue) -> None:
+    pool = demo_app.pool
+    await pool.execute(
+        "INSERT INTO pgqueue_jobs (queue, task, status, finished_at) "
+        "SELECT 'q', 't', 'dead', now() FROM generate_series(1, 3)"
+    )
+    oldest = await pool.fetchval("SELECT min(id) FROM pgqueue_jobs")
+    async with pool.acquire() as conn:
+        # Someone requeues the oldest dead job and commits while the sweep runs.
+        transaction = conn.transaction()
+        await transaction.start()
+        await conn.execute(
+            "UPDATE pgqueue_jobs SET status = 'queued', finished_at = NULL WHERE id = $1", oldest
+        )
+        sweep = asyncio.create_task(retention.sweep(demo_app.store, max_age=3600, max_rows=0))
+        await asyncio.sleep(0.3)
+        await transaction.commit()
+        _, over, _ = await asyncio.wait_for(sweep, 10)
+    assert over == 2
+    assert await pool.fetchval("SELECT status::text FROM pgqueue_jobs WHERE id = $1", oldest) == (
+        "queued"
+    )
+
+
 # -- supervisor -------------------------------------------------------------------------------
 
 

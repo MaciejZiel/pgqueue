@@ -12,7 +12,9 @@ log = logging.getLogger("demo.retention")
 TERMINAL = "('succeeded', 'failed', 'dead')"
 
 # Delete the oldest finished rows beyond a fixed count, whatever their age: a burst can
-# never make the table outgrow the cap between two runs by more than one burst.
+# never make the table outgrow the cap between two runs by more than one burst. Rows are
+# locked (skipping any held elsewhere) and their status checked again on deletion, so a
+# job that left the finished state meanwhile (requeued, say) is never deleted.
 _CAP = f"""
 DELETE FROM pgqueue_jobs
 WHERE id IN (
@@ -23,7 +25,9 @@ WHERE id IN (
         0,
         (SELECT count(*) FROM pgqueue_jobs WHERE status IN {TERMINAL}) - $1::int
     )
+    FOR UPDATE SKIP LOCKED
 )
+AND status IN {TERMINAL}
 """
 
 
