@@ -89,7 +89,7 @@ not need because its job rows already hold them. Celery is charged that extra ro
 ### Backlog throughput (jobs/s)
 
 
-| Worker processes | pgqueue | Celery + Valkey |
+| Worker processes | pgqueue | Celery (thread pool, 32 threads, prefetch x4, early ack) |
 |---:|---:|---:|
 | 1 | 825 (725-1,399) | 349 (280-499) |
 | 2 | 1,702 (1,427-2,528) | 722 (574-1,268) |
@@ -119,13 +119,17 @@ not need because its job rows already hold them. Celery is charged that extra ro
 ### Payload size, 4 workers, backlog throughput (jobs/s)
 
 
-| Payload | pgqueue | Celery + Valkey |
+| Payload | pgqueue | Celery (thread pool, 32 threads, prefetch x4, early ack) |
 |---|---:|---:|
 | 256 B | 2,998 (2,319-6,370) | 3,163 (1,029-3,737) |
 | 2,048 B | 3,261 (2,329-4,873) | 2,281 (1,036-3,403) |
 | 16,384 B | 2,931 (1,489-5,485) | 1,921 (984-2,911) |
 
-Load average (1 minute) sampled at each measurement: min 2.3, median 10.4, max 37.7.
+Load average (1 minute) sampled after each measurement: min 2.3, median 10.4, max 37.7.
+
+Results file schema 1: the order was fixed (pgqueue first, then Celery) and one load value
+was stored per measurement, taken after it. The rows labelled "Celery + Valkey" in the
+enqueue and pickup tables are the same Celery configuration as in the column headers above.
 
 
 ## How to read this
@@ -140,12 +144,38 @@ a middle value of a noisy sample, not a property of the queue. Treat the figures
 order of magnitude: low thousands of jobs per second per Postgres on a laptop, no-op
 handler, default Postgres settings.
 
-**Comparisons are more trustworthy than absolute numbers**, because both systems ran
-inside the same run, a few seconds apart, under similar load. In the backlog scenario
-pgqueue was faster than Celery in 5 of 5 runs at 1, 2 and 4 workers (1.2 to 2.8 times) and
-in 4 of 5 runs at 8 workers (0.84 to 2.3 times; run 4 went to Celery, 6,747 against
-5,665 jobs/s). With only 5 runs per cell and
-that variance this is a pattern, not a significance test.
+**The comparison is weaker than it first looks.** In every run pgqueue was measured first
+and Celery a few seconds after it, always in that order, so any systematic effect of the
+order (a warm page cache, a checkpoint or autovacuum triggered by the previous
+measurement, a load spike that happens to start between the two) is not counterbalanced.
+The machine was also busy with unrelated work, so the two halves of a pair did not
+necessarily see the same load. Nothing in this data can separate those effects from a real
+difference; the changed benchmark script (see [Method](#method-schema-2)) alternates the
+order and records the load, but it has not been rerun.
+
+What the first run does show, per number of worker processes (pgqueue over Celery, jobs/s
+ratio per run, runs 1 to 5):
+
+| Workers | Ratio in each run | Reading |
+|---:|---|---|
+| 1 | 2.69, 2.59, 2.13, 2.25, 2.80 | pgqueue about 2 to 2.8 times faster in all 5 runs |
+| 2 | 2.49, 2.36, 2.53, 1.83, 1.99 | about 1.8 to 2.5 times in all 5 runs |
+| 4 | 2.49, 2.03, 2.22, 1.21, 2.16 | ahead in all 5 runs, but only 1.21 in run 4, one of the two quiet runs |
+| 8 | 1.39, 2.31, 1.22, 0.84, 1.38 | mixed; Celery ahead in run 4 (6,747 against 5,665 jobs/s) |
+
+Runs 4 and 5 were the quietest (1-minute load roughly 3 to 6). On those two runs, 4 to 8
+workers were close to even: at 8 workers the ratios were 0.84 and 1.38, and at 4 workers
+1.21 and 2.16. The roughly 2 times advantage holds at 1 and 2 worker processes in every run
+including the quiet ones. That is the only claim here that is robust to the noise; at 4 and
+8 workers the data supports "pgqueue was not slower in 9 of 10 runs, and possibly about even
+on a quiet machine", not a ratio. With 5 runs per cell this is a pattern, not a
+significance test.
+
+The payload-size scenario (4 workers) is not a win for pgqueue either. At 2 KiB the
+per-run ratios were 3.52, 2.23, 0.89, 1.44 and 1.43, so Celery won run 3. At 256 B pgqueue
+lost 2 of 5 runs (ratios 3.40, 2.00, 0.74, 1.70, 0.95) and its median was below Celery's
+(2,998 against 3,163 jobs/s). At 16 KiB pgqueue lost run 3 (0.78) and the other four were
+ahead. Do not read the payload table as pgqueue being faster at 4 workers.
 
 **Enqueue favours Celery, as it should.** A Valkey publish with persistence off is a memory
 write; a pgqueue `enqueue()` is a durable commit. The gap on single-job enqueue is what
@@ -155,7 +185,8 @@ commit across the batch.
 
 **Pickup latency is low for both at this rate.** With idle workers the median is a few
 milliseconds for both systems. Comparing the two within each run, pgqueue's median was
-between 1.0 and 2.9 times Celery's. The tails differ more: pgqueue's p99 is tens of milliseconds, with single
+between 1.0 and 2.9 times Celery's, over intervals that are not equivalent (see "What is
+timed": pgqueue's includes a durable commit, Celery's does not). The tails differ more: pgqueue's p99 is tens of milliseconds, with single
 outliers in the hundreds under load. Do not read the 1-worker row as a scaling effect; the
 runs with a loaded machine dominate the maximum values.
 
@@ -193,20 +224,54 @@ across worker counts on a dedicated machine.
   compete for the same 16 threads and the same disk. On separate hosts the network adds
   latency and the CPU contention disappears. Neither is modeled here.
 * **Noisy host.** See above. The load averages are stored with every measurement.
+* **The ratios are not like-for-like.** Besides durability, the pickup intervals differ in
+  what they contain (see "What is timed").
 * **Five runs.** Enough to show the spread, not enough for confidence intervals.
 * **No-op handler.** Real jobs spend time in their handler, which moves the bottleneck away
   from the queue. For handlers that take tens of milliseconds or longer, the queue is
   unlikely to be the limit at these rates.
 * **Default Postgres.** `shared_buffers = 128MB` and the default WAL settings. Tuning
   would likely move the numbers, and it was not tried.
-* **Durability is not equal.** pgqueue commits every job with an fsync; Valkey runs without
-  persistence. A Valkey with `appendonly yes` would be slower to enqueue; it was not
-  measured here.
+* **Durability is not equal, in enqueue and in drain.** pgqueue commits every job, every
+  claim and every completion with an fsync; Valkey runs without persistence and Celery
+  acknowledges early (`acks_late=False`), so a crash loses in-flight tasks. A Valkey with
+  `appendonly yes`, or Celery with `acks_late=True`, would be slower; neither was measured.
+* **Order not counterbalanced (first run).** pgqueue always ran first. See "How to read this".
 * **Celery configuration.** One configuration (thread pool, 32 threads per process,
-  defaults otherwise). Other pools and settings were not measured. RQ was not benchmarked.
+  prefetch multiplier 4, early ack, defaults otherwise). Other pools and settings were not
+  measured. RQ was not benchmarked.
 * **Steady-state window.** Backlog throughput excludes the first 20% and the last 5% of
   the completions. It is not the time to drain the whole backlog.
 * **The dataset is small.** The 20,000-job backlog stays in memory; a queue table of tens
   of millions of rows, bloat, autovacuum and retention were not tested.
 * **Single-job enqueue measures a sequential client.** The "10 concurrent clients" row shares
   one asyncpg pool (pgqueue) or ten threads (Celery); both are bound by the same machine.
+
+## Method (schema 2)
+
+`bench/bench.py` was changed after the first run to remove the weaknesses described above.
+None of the numbers in this document come from the changed script yet.
+
+* **Counterbalanced order.** In every repeat, odd run numbers measure pgqueue first and
+  even run numbers measure Celery first. With the default 5 runs this is 3 against 2, so use
+  an even `--runs` (for example 6) if you want an exactly balanced design.
+* **Cool-down between the two systems of a pair.** `--cooldown SECONDS` (default 30, forced
+  to 0 with `--quick`) pauses between them so the checkpointer and autovacuum started by
+  the first measurement can settle instead of landing in the second one. It also adds
+  about 30 s per pair to the run time.
+* **Load before and after each measurement.** Each record has `load_1min_before` and
+  `load_1min` (after), the 1-minute load average from `/proc/loadavg`, and `position`
+  (`first`, `second`, or `only` for `enqueue_many`, which has no Celery counterpart).
+* **Results file version.** `bench/results.json` has `schema_version: 2`, and `parameters`
+  gains `counterbalanced` and `cooldown_s`. A file without `schema_version` is schema 1.
+  The record fields of schema 1 are all still present, `load_1min` keeps its meaning, so
+  `bench.report` and `bench.chart` read both versions. The checked-in file is still the
+  schema 1 first run.
+
+To rerun on a quiet machine:
+
+    make bench ARGS="--runs 6"
+
+A run of 6 repeats takes roughly an hour and a half plus the cool-downs; check
+`uptime` first and do not run other jobs at the same time, otherwise the load columns will
+just document the same problem again.
