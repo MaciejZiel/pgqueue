@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `create_app(..., public=True)` (or `PGQUEUE_ADMIN_PUBLIC=1`) for instances shown to the public:
+  `/metrics` and the API docs (`/docs`, `/redoc`, `/openapi.json`) are not served. The live demo
+  uses it.
+- The demo's nginx config now answers 404 for those paths and sends a Content-Security-Policy,
+  `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and `Permissions-Policy`
+  (`deploy/termux/nginx-headers.conf`).
+- The dashboard no longer writes `style` attributes (bar widths are set through the DOM), so a
+  policy without `'unsafe-inline'` works.
+
 ### Added
 
 - `make bench`: a reproducible benchmark with a 1/2/4/8 worker sweep, enqueue and pickup latency

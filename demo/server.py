@@ -25,7 +25,7 @@ def build_app(settings: Settings, *, background: bool = True) -> FastAPI:
     With ``background=False`` only the dashboard is served (used by tests and when the
     workload runs elsewhere).
     """
-    app = create_app(settings.dsn, read_only=True, banner=settings.banner)
+    app = create_app(settings.dsn, read_only=True, public=True, banner=settings.banner)
     inner = app.router.lifespan_context
 
     @asynccontextmanager
