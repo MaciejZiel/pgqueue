@@ -449,51 +449,46 @@ What happens when…
 `make bench` runs a reproducible benchmark against a real PostgreSQL and, next to it,
 Celery on Valkey (the BSD-licensed Redis fork) with the same no-op handler, the same
 2 KiB JSON payload and 32 job slots per worker process. Workers are separate processes
-started through the real CLI. Each cell is repeated 5 times. The full method, every table,
-the SKIP LOCKED explanation and the caveats are in [`docs/benchmarks.md`](docs/benchmarks.md);
-raw per-run numbers are in [`bench/results.json`](bench/results.json). The benchmark script
-now alternates which system runs first and pauses between them; the numbers here predate that
-change (see the doc).
+started through the real CLI. Each cell is repeated 6 times, with the order of the two
+systems alternating and a 30 s cool-down between them. The full method, every table, the
+SKIP LOCKED explanation and the caveats are in [`docs/benchmarks.md`](docs/benchmarks.md);
+raw per-run numbers are in [`bench/results.json`](bench/results.json).
 
 Read the numbers with these caveats first: one 13th Gen Intel i5-13500H laptop (16 threads,
 14 GiB RAM) running Postgres 17 with default settings, Valkey, the workers and the load
-generator together, **and busy with unrelated work during the runs** (1-minute load average
-between 2 and 38). Run-to-run spread is large, so cells are the median with the minimum and
-maximum run in brackets. This is a first run: the order was fixed (pgqueue first, then
-Celery), so it is not counterbalanced, and it has not been repeated on a quiet machine.
+generator together. The machine was not dedicated: the 1-minute load average was between
+0.8 and 3.6 before each drain measurement and peaked at 11 during the run. Cells are the
+median with the minimum and maximum run in brackets.
 
 | Backlog of 20,000 jobs, jobs/s | pgqueue | Celery (thread pool, 32 threads, prefetch x4, early ack) |
 |---:|---:|---:|
-| 1 worker process | 825 (725-1,399) | 349 (280-499) |
-| 2 worker processes | 1,702 (1,427-2,528) | 722 (574-1,268) |
-| 4 worker processes | 3,915 (2,444-5,475) | 1,765 (990-3,354) |
-| 8 worker processes | 4,161 (2,589-8,142) | 3,422 (1,683-6,747) |
+| 1 worker process | 1,323 (1,182-1,347) | 441 (400-445) |
+| 2 worker processes | 2,788 (2,431-2,907) | 840 (725-1,000) |
+| 4 worker processes | 5,267 (3,870-5,577) | 2,950 (1,279-3,003) |
+| 8 worker processes | 10,103 (6,927-10,424) | 6,650 (2,292-6,693) |
 
 ![Backlog throughput by number of worker processes](docs/benchmarks-throughput.svg)
 
 What this does and does not show:
 
-- The robust result is at 1 and 2 worker processes: pgqueue was about 2 times faster
-  (1.8 to 2.8 times) in all 5 runs. At 4 and 8 workers the claim is weaker. On the two
-  quietest runs (4 and 5, load about 3 to 6) the two were roughly even at 8 workers
-  (ratios 0.84 and 1.38) and pgqueue led by 1.21 and 2.16 at 4 workers. In the 4-worker
-  payload-size scenario Celery won some runs: at 2 KiB the ratios were 3.52, 2.23, 0.89,
-  1.44 and 1.43, and at 256 B pgqueue lost 2 of 5 runs and its median was below Celery's
-  (2,998 against 3,163 jobs/s). Within a run pgqueue was always measured first and Celery
-  a few seconds after, so the order is not counterbalanced, and the load was not the same
-  for both halves. The absolute numbers moved by up to a factor of four with how busy the
-  machine was.
+- pgqueue drained the backlog faster than this Celery configuration in all 6 runs at every
+  worker count: about 3 times at 1 and 2 worker processes, and about 1.3 to 1.9 times at 4
+  and 8 in the typical runs. Three Celery cells (4 workers run 6, 8 workers runs 5 and 6)
+  were two to three times slower than its other runs for a reason that was not
+  investigated, which pulls the median ratio up. The order did not matter: pgqueue led
+  whether it ran first or second. The 3 times lead at 1 and 2 workers is largely a
+  property of one thread-pool process under the GIL against an asyncio worker.
 - The two are not equal in durability. pgqueue commits the claim and the completion of
   each job with an fsync; this Celery setup acknowledges early (`acks_late=False`, a crash
   loses in-flight tasks) on a Valkey without persistence. So the drain comparison is a
   durable queue against a non-durable one.
 - Enqueue is where Postgres pays for durability: a single `enqueue()` call (one fsynced
-  commit) took a median of 4.4 ms at 184 jobs/s for one client, against 1.7 ms and 566
+  commit) took a median of 4.4 ms at 226 jobs/s for one client, against 0.8 ms and 1,251
   jobs/s for a Celery publish to a Valkey without persistence. `enqueue_many` inserted
-  1,000 jobs per call at 6,188 jobs/s (median; range 5,181 to 14,792).
-- Pickup latency at 200 jobs/s into idle workers had a p50 of 4.5 to 7.3 ms for pgqueue
-  and 3.5 to 4.5 ms for Celery depending on the worker count; pgqueue's p99 was 15 to
-  38 ms, Celery's 6 to 11 ms. The intervals differ: pgqueue's runs from `created_at`
+  1,000 jobs per call at 14,162 jobs/s (median; range 9,413 to 15,559).
+- Pickup latency at 200 jobs/s into idle workers had a p50 of 3.9 to 6.5 ms for pgqueue
+  and 3.4 to 3.6 ms for Celery depending on the worker count; pgqueue's p99 was 9 to
+  22 ms, Celery's 4.1 to 4.7 ms. The intervals differ: pgqueue's runs from `created_at`
   (before the fsynced insert commit) to `started_at` (set in the claim statement), Celery's
   from just before `apply_async` serialises the message to the start of the handler. The
   ratios are not like-for-like.
@@ -506,8 +501,8 @@ What this does and does not show:
   index per queue through a `LATERAL` subquery brought that to ~0.1 ms and doubled
   throughput.
 
-Reproduce: `make bench` (needs Docker and uv; about an hour), then `make bench-chart` to
-redraw the charts. `make bench-quick` checks the setup in a few minutes.
+Reproduce: `make bench ARGS="--runs 6"` (needs Docker and uv; about 25 minutes), then
+`make bench-chart` to redraw the charts. `make bench-quick` checks the setup in a few minutes.
 
 ## Design decisions and trade-offs
 
