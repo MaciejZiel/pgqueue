@@ -243,6 +243,16 @@ The public dashboard exposes **no endpoint that changes state**: in read-only mo
 mounted at all, and the buttons are not rendered. Settings are environment variables, listed in
 [`deploy/termux/env.example`](deploy/termux/env.example).
 
+A read-only dashboard also shows less about the machine it runs on. Job errors are cut to their
+last line (exception type and message) with absolute paths replaced by `<path>`, and workers appear
+under a short stable label (`w-1a2b3c`) without host name or pid, in `/api/jobs`, `/api/live`,
+`/api/overview` and `/metrics`. The full traceback and the real worker id stay in the database and in
+a normal (not read-only) admin. Job ids in the API must be between 1 and 2^63 - 1, otherwise the
+answer is 422.
+
+With `PGQUEUE_READONLY_DSN` (or `create_app(..., read_only_dsn=...)`) a read-only app connects as a
+different database role than the workload, so the public process can only `SELECT`.
+
 **What a visitor can and cannot do.** The demo has no input path for code or URLs. Every job
 is built by the demo's own generator from fixed task types and numbers, and the "webhook"
 tasks only sleep and fail on a schedule: nothing makes an outgoing request. The public app
@@ -281,7 +291,9 @@ $ deploy/termux/start.sh                                     # try it by hand fi
 ```
 
 - **Start on boot**: copy `deploy/termux/boot/pgqueue-demo` to `~/.termux/boot/` (Termux:Boot);
-  it waits for PostgreSQL and restarts the demo if it exits.
+  it waits for PostgreSQL and restarts the demo if it exits. Output goes through
+  `deploy/termux/logcap.sh`, which rotates `~/.local/state/pgqueue-demo.log` at 1 MiB and keeps two
+  old files (`PGQUEUE_LOG_MAX_BYTES`, `PGQUEUE_LOG_KEEP`), so the log stays under about 3 MiB.
 - **nginx**: include `nginx-zones.conf` in the `http` block and `nginx-location.conf` in the
   `server` block. It publishes the dashboard under `/pgqueue/`, serves the static files from
   disk, disables buffering for the event stream, limits requests and streams per visitor
@@ -301,8 +313,14 @@ $ deploy/termux/start.sh                                     # try it by hand fi
   Nothing else changes: `nginx-zones.conf` and `~/.config/pgqueue-demo/env` stay as they are.
 - **Public access**: put a Cloudflare Tunnel or Tailscale Funnel in front of nginx; the demo
   itself only listens on `127.0.0.1`.
-- **Database**: the demo uses its own role and database and works with PostgreSQL 16 to 18
-  (CI runs the test suite on all three).
+- **Database**: the demo uses its own database and works with PostgreSQL 16 to 18 (CI runs the test
+  suite on all three). `setup-db.sh` creates two roles: `pgqueue_demo` owns the database, runs the
+  workload and is limited to 40 connections; `pgqueue_demo_ro` (when `DEMO_RO_PASSWORD` is set) can
+  only `SELECT`, is read-only by default and is limited to 10 connections. Put its DSN in
+  `PGQUEUE_READONLY_DSN` for the public dashboard. The script also revokes `CONNECT` on
+  `pgqueue_demo` from `PUBLIC`. On a PostgreSQL shared with other applications, do the same for
+  their databases, because every role may connect to a database by default:
+  `REVOKE CONNECT ON DATABASE other_db FROM PUBLIC;` (then grant it to that application's role).
 
 ## Architecture
 

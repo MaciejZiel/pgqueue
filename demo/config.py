@@ -27,6 +27,8 @@ def _int(env: Mapping[str, str], name: str, default: int) -> int:
 @dataclass(frozen=True, slots=True)
 class Settings:
     dsn: str
+    read_only_dsn: str | None = None
+    """Used by the public dashboard when set: a role that can only SELECT."""
     host: str = "127.0.0.1"
     port: int = 8080
     root_path: str = ""
@@ -65,6 +67,7 @@ class Settings:
         root_path = env.get("DEMO_ROOT_PATH", "").strip().rstrip("/")
         return cls(
             dsn=dsn,
+            read_only_dsn=env.get("PGQUEUE_READONLY_DSN") or None,
             host=env.get("DEMO_HOST", defaults.host),
             port=_int(env, "DEMO_PORT", defaults.port),
             root_path=root_path,
