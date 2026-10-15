@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://pgqueue.maciejzielinski.dev">Live demo</a> · <a href="https://status.maciejzielinski.dev">Status</a> · <a href="https://maciejzielinski.dev">Portfolio</a>
+  <a href="https://maciejzielinski.dev">Portfolio</a>
 </p>
 
 <p align="center">
@@ -20,8 +20,7 @@
   <img alt="mypy strict" src="https://img.shields.io/badge/mypy-strict-2a6db2">
 </p>
 
-<p align="center">No Redis, no RabbitMQ, no second system to operate, back up and keep consistent with your data.<br>
-The live demo is a read-only dashboard over a synthetic workload on a real PostgreSQL: watch jobs retry, die and get recovered after a worker is killed.</p>
+<p align="center">No Redis, no RabbitMQ, no second system to operate, back up and keep consistent with your data.</p>
 
 pgqueue is a small job queue library built around one PostgreSQL feature: `SELECT … FOR UPDATE SKIP LOCKED`. It gives you typed tasks, retries
 with backoff, a dead-letter state, scheduled and cron jobs, crash recovery through leases,
@@ -29,7 +28,7 @@ LISTEN/NOTIFY wake-ups, a dashboard and Prometheus metrics, and it lets you enqu
 **in the same transaction** as the data it refers to.
 
 <p align="center">
-  <a href="https://pgqueue.maciejzielinski.dev"><img src="docs/dashboard.png" width="860" alt="The pgqueue dashboard at desktop width, showing throughput, latency and queue depth for the demo workload"></a>
+  <img src="docs/dashboard.png" width="860" alt="The pgqueue dashboard at desktop width, showing throughput, latency and queue depth for the demo workload">
 </p>
 
 ```python
@@ -74,7 +73,7 @@ $ pgqueue admin --port 8080          # dashboard, JSON API and /metrics
 - [Why a queue in Postgres?](#why-a-queue-in-postgres)
 - [Features](#features)
 - [Quick start](#quick-start)
-- [The live demo](#the-live-demo)
+- [The demo dashboard](#the-demo-dashboard)
 - [Self-hosting on Termux](#self-hosting-on-termux)
 - [Architecture](#architecture)
 - [Guarantees and failure semantics](#guarantees-and-failure-semantics)
@@ -192,18 +191,11 @@ $ PGQUEUE_ADMIN_USERNAME=ops PGQUEUE_ADMIN_PASSWORD=… pgqueue admin --host 0.0
 $ pgqueue prune --older-than-days 14      # e.g. from a nightly cron
 ```
 
-## The live demo
+## The demo dashboard
 
-The public instance is at <https://pgqueue.maciejzielinski.dev> (uptime on the
-[status page](https://status.maciejzielinski.dev)).
-
-**Self-hosted:** it runs on a home server, as plain processes next to a PostgreSQL (see
-[Self-hosting on Termux](#self-hosting-on-termux)), not on a cloud platform.
-
-`python -m demo` (or the Termux setup below) starts the same self-contained showcase locally: the
+`python -m demo` (or the Termux setup below) starts a self-contained showcase: the
 dashboard in **read-only mode** plus a synthetic workload that keeps it alive. Everything in
-the screenshots below, captured from the live demo, is real: real workers, real jobs, real
-PostgreSQL.
+the screenshots below is real: real workers, real jobs, real PostgreSQL.
 
 ![Full dashboard at desktop width](docs/dashboard.png)
 
@@ -620,7 +612,7 @@ runs lint, strict mypy and the full suite against Postgres 16, 17 and 18, and bu
 image.
 
 Project layout: `src/pgqueue` (library, CLI, admin), `tests`, `examples` (the compose demo),
-`demo` (the public live demo: workload, workers, read-only server), `deploy/termux`
+`demo` (the demo: workload, workers, read-only server), `deploy/termux`
 (self-hosting scripts), `bench` (benchmarks).
 
 ## Changelog
